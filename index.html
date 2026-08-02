@@ -394,7 +394,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 18:10';
+const BUILD_STAMP = '2026-08-02 18:17';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -1321,7 +1321,7 @@ async function runProfileExtraction(files, onProgress) {
 }
 
 function friendlyExtractError(e) {
-  if (e && e.code === 'NO_API_KEY') return 'Add your Anthropic API key in Settings before importing screenshots.';
+  if (e && e.code === 'NO_API_KEY') return 'No Anthropic API key on this device. Add it in Settings — it is stored per device, so each browser needs it once.';
   if (e && e.code === 'BAD_API_KEY') return 'That API key was rejected — check it in Settings.';
   if (e && e.code === 'API_FAILED') return e.message;
   return null; // caller supplies its own default message
@@ -1645,18 +1645,38 @@ async function generateCoachSummary(person) {
   };
 }
 
-function StatusPanel({ read, busy, error, onRefresh }) {
+function StatusPanel({ read, busy, error, onRefresh, onOpenSettings }) {
+  const needsKey = !Local.get('anthropic-api-key');
   return (
     <div className="bg-white border border-stone-200 rounded-lg p-4 mb-4">
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-semibold text-stone-700">Where this stands</h3>
-        <button onClick={onRefresh} disabled={busy}
-          className="text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100 disabled:opacity-60">
-          {busy ? 'Reading…' : read ? 'Refresh' : 'Get a read'}
-        </button>
+        {needsKey ? (
+          <button onClick={onOpenSettings}
+            className="text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100">
+            Add API key
+          </button>
+        ) : (
+          <button onClick={onRefresh} disabled={busy}
+            className="text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100 disabled:opacity-60">
+            {busy ? 'Reading…' : read ? 'Refresh' : 'Get a read'}
+          </button>
+        )}
       </div>
-      {error && <p className="text-xs text-red-700">{error}</p>}
-      {!read && !busy && !error && (
+      {needsKey && !error && (
+        <p className="text-sm text-stone-500">
+          A read needs an Anthropic API key. It lives on this device only, so each browser you use needs it entered once.
+        </p>
+      )}
+      {error && (
+        <div className="text-xs text-red-700">
+          {error}
+          {/API key/i.test(error) && (
+            <button onClick={onOpenSettings} className="ml-1 underline font-medium">Open Settings</button>
+          )}
+        </div>
+      )}
+      {!read && !busy && !error && !needsKey && (
         <p className="text-sm text-stone-500">No read yet — pull one once there's a profile, a chat or a date logged.</p>
       )}
       {read && (
@@ -2352,6 +2372,7 @@ function RelationshipTracker() {
             busy={coachBusy}
             error={coachError}
             onRefresh={refreshCoachRead}
+            onOpenSettings={() => setShowSettings(true)}
           />
 
           <ProfileCard profile={selected.profile || emptyProfile()} onEdit={() => setShowProfileEdit(true)} />
@@ -2509,6 +2530,17 @@ function RelationshipTracker() {
           <PersonFormModal
             form={personForm} setForm={setPersonForm} isNew={personEditId === 'new'}
             onCancel={cancelPersonForm} onSave={savePersonForm} knownChannels={knownChannels}
+          />
+        )}
+        {showSettings && (
+          <SettingsModal
+            onClose={() => setShowSettings(false)}
+            people={people}
+            onImportData={async (imported) => { await persist(imported); }}
+            syncState={syncState}
+            onConnectSync={connectSync}
+            onDisconnectSync={disconnectSync}
+            onSyncNow={() => pullFromCloud(false)}
           />
         )}
         {error && <ErrorToast message={error} />}
@@ -4746,7 +4778,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 18:10';
+const BUILD_STAMP = '2026-08-02 18:17';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -5827,7 +5859,7 @@ async function runProfileExtraction(files, onProgress) {
   };
 }
 function friendlyExtractError(e) {
-  if (e && e.code === 'NO_API_KEY') return 'Add your Anthropic API key in Settings before importing screenshots.';
+  if (e && e.code === 'NO_API_KEY') return 'No Anthropic API key on this device. Add it in Settings — it is stored per device, so each browser needs it once.';
   if (e && e.code === 'BAD_API_KEY') return 'That API key was rejected — check it in Settings.';
   if (e && e.code === 'API_FAILED') return e.message;
   return null; // caller supplies its own default message
@@ -6179,21 +6211,31 @@ function StatusPanel({
   read,
   busy,
   error,
-  onRefresh
+  onRefresh,
+  onOpenSettings
 }) {
+  const needsKey = !Local.get('anthropic-api-key');
   return /*#__PURE__*/React.createElement("div", {
     className: "bg-white border border-stone-200 rounded-lg p-4 mb-4"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between mb-2"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "text-sm font-semibold text-stone-700"
-  }, "Where this stands"), /*#__PURE__*/React.createElement("button", {
+  }, "Where this stands"), needsKey ? /*#__PURE__*/React.createElement("button", {
+    onClick: onOpenSettings,
+    className: "text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100"
+  }, "Add API key") : /*#__PURE__*/React.createElement("button", {
     onClick: onRefresh,
     disabled: busy,
     className: "text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100 disabled:opacity-60"
-  }, busy ? 'Reading…' : read ? 'Refresh' : 'Get a read')), error && /*#__PURE__*/React.createElement("p", {
+  }, busy ? 'Reading…' : read ? 'Refresh' : 'Get a read')), needsKey && !error && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-500"
+  }, "A read needs an Anthropic API key. It lives on this device only, so each browser you use needs it entered once."), error && /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-red-700"
-  }, error), !read && !busy && !error && /*#__PURE__*/React.createElement("p", {
+  }, error, /API key/i.test(error) && /*#__PURE__*/React.createElement("button", {
+    onClick: onOpenSettings,
+    className: "ml-1 underline font-medium"
+  }, "Open Settings")), !read && !busy && !error && !needsKey && /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-500"
   }, "No read yet — pull one once there's a profile, a chat or a date logged."), read && /*#__PURE__*/React.createElement("div", {
     className: "space-y-2"
@@ -7023,7 +7065,8 @@ function RelationshipTracker() {
       read: selected.coachRead || null,
       busy: coachBusy,
       error: coachError,
-      onRefresh: refreshCoachRead
+      onRefresh: refreshCoachRead,
+      onOpenSettings: () => setShowSettings(true)
     }), /*#__PURE__*/React.createElement(ProfileCard, {
       profile: selected.profile || emptyProfile(),
       onEdit: () => setShowProfileEdit(true)
@@ -7164,6 +7207,16 @@ function RelationshipTracker() {
       onCancel: cancelPersonForm,
       onSave: savePersonForm,
       knownChannels: knownChannels
+    }), showSettings && /*#__PURE__*/React.createElement(SettingsModal, {
+      onClose: () => setShowSettings(false),
+      people: people,
+      onImportData: async imported => {
+        await persist(imported);
+      },
+      syncState: syncState,
+      onConnectSync: connectSync,
+      onDisconnectSync: disconnectSync,
+      onSyncNow: () => pullFromCloud(false)
     }), error && /*#__PURE__*/React.createElement(ErrorToast, {
       message: error
     }));
