@@ -395,7 +395,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 20:01';
+const BUILD_STAMP = '2026-08-02 20:25';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -633,7 +633,7 @@ function readIsStale(person) {
   const past = [lastActivity(person), person.lastContact, ...dates]
     .filter(Boolean).filter(d => d <= today).sort();
   const latest = past.length ? past[past.length - 1] : '';
-  return !!latest && latest > read.generatedAt;
+  return !!latest && latest > String(read.generatedAt).slice(0, 10);
 }
 
 // The recommendation trimmed to its first sentence, for the home card.
@@ -750,10 +750,10 @@ function migrateConversationLog(log) {
   return out;
 }
 
-const DAY_SUMMARY_PROMPT = `Below is one day's worth of an already-condensed chat log between a man and a woman he is dating. "Me" is him, "She" is her. Turn it into a record entry. Respond with ONLY a JSON object, no other text, no markdown fences:
+const DAY_SUMMARY_PROMPT = `Below is one day's worth of an already-condensed chat log between the reader and a woman he is dating. "Me" is the reader, "She" is her. This is his own private record, so write it TO HIM in the second person — "you" and "she", never "he", "him" or "the user". Respond with ONLY a JSON object, no other text, no markdown fences:
 {
-"summary": string — two or three sentences on what this exchange was about and how it went between them.
-"facts": array of short strings — the things worth remembering: what she revealed about her life, work, family, plans or opinions; anything agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, compliments and other small talk. Empty array if it was all small talk.
+"summary": string — two or three sentences addressed to him on what this exchange was about and how it went between you and her. For example: "You opened about her hiking photo and she came back warmly, though she kept it brief." Never write about him in the third person.
+"facts": array of short strings — the things worth remembering, written to him: what she revealed about her life, work, family, plans or opinions; anything you agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, compliments and other small talk. Empty array if it was all small talk.
 }
 Work only from the lines given. Do not invent anything. Respond with the JSON object only.`;
 
@@ -941,7 +941,7 @@ function fileToBase64(file) {
 }
 
 const PERSON_EXTRACT_PROMPT = `This is a screenshot from a dating app or messaging app (match screen, profile, or chat history). Extract what you can and respond with ONLY a JSON object, no other text, no markdown code fences, in exactly this shape:
-{"name": string or null, "meetingChannel": string or null (the app name if identifiable, e.g. Hinge, Tinder, Bumble, Instagram, WhatsApp), "dateMet": string or null (YYYY-MM-DD if a date is visible or can reasonably be inferred, else null), "summary": string or null (1-2 sentence summary of anything useful for a personal dating log — interests mentioned, tone of conversation, etc.)}
+{"name": string or null, "meetingChannel": string or null (the app name if identifiable, e.g. Hinge, Tinder, Bumble, Instagram, WhatsApp), "dateMet": string or null (YYYY-MM-DD if a date is visible or can reasonably be inferred, else null), "summary": string or null (1-2 sentence summary for his personal dating log, written to him in the second person — "you" and "she", never "he")}
 If a field can't be determined, use null for it. Respond with the JSON object only.`;
 
 const DATE_EXTRACT_PROMPT = `This is a screenshot of a chat conversation, likely about making plans to meet up. Extract what you can and respond with ONLY a JSON object, no other text, no markdown code fences, in exactly this shape:
@@ -1030,7 +1030,9 @@ THE THREE LOCATION FIELDS ARE DIFFERENT THINGS. Work through them like this:
 
 Use null for any single-value field you cannot determine, and an empty array for any list. Do not invent anything. Respond with the JSON object only.`;
 
-const CONVERSATION_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of ONE tall screenshot of a chat conversation, given top to bottom (oldest first). It could be any messaging app — WhatsApp, iMessage, Bumble, Hinge, Instagram. The user is a man; the other person is a woman.
+const CONVERSATION_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of ONE tall screenshot of a chat conversation, given top to bottom (oldest first). It could be any messaging app — WhatsApp, iMessage, Bumble, Hinge, Instagram. You are reading this on behalf of the man whose phone it is; the other person is a woman.
+
+WRITE EVERYTHING TO HIM, IN THE SECOND PERSON. This is his own private record. Summaries and facts say "you" and "she" — never "he", "him", "the user", or "they" meaning the pair of you. "You asked about her weekend and she took a day to reply", not "He asked about her weekend".
 
 WORK OUT WHO IS WHO BEFORE YOU SUMMARISE. This is the part that goes wrong most often, so do it deliberately:
 - The name in the chat header is HER. Any message signed, addressed to, or greeting that name was written by the user, not her.
@@ -1053,12 +1055,12 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
   {
     "dayLabel": string or null (the divider exactly as printed above this session, e.g. "Today", "14 July"),
     "date": string or null (YYYY-MM-DD. RESOLVE THE DIVIDER — see the dating rules below. Null only if this session has no day information of any kind above it.),
-    "summary": string — two or three sentences on what this session was actually about and how it went. Written about them, not as a transcript.
+    "summary": string — two or three sentences addressed to him on what this session was about and how it went between you and her. Second person throughout. Not a transcript.
     "facts": array of short strings — the things worth remembering: what she revealed about her life, work, family, plans or opinions; anything agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, "how was your day", compliments and other small talk. Empty array if the session was pure small talk.
     "points": array of {"from": "she" or "me", "point": string, "timeLabel": string or null} — the underlying chronology, one condensed line per meaningful exchange of about 8-15 words, in order. This is the detail behind the summary.
   }
 "dateEvents": array of objects {"date": string or null (YYYY-MM-DD if determinable), "dayText": string or null, "timeText": string or null, "venue": string or null, "activity": string or null, "status": "proposed" or "agreed" or "happened" or "cancelled", "proposedBy": "she" or "me" or null} — every meeting between them the chat discusses. Only where a day, a place or a specific activity is named; never from vague talk of meeting sometime.
-"summary": string — two or three sentences on where the whole conversation stands: tone, momentum, anything agreed or left open.
+"summary": string — two or three sentences addressed to him on where the whole conversation stands: tone, momentum, anything agreed or left open. Second person throughout.
 "phoneNumbers": array of strings.
 }
 RESOLVING DATES. You are told today's date below. Chat apps write dividers in several styles and you must convert every one of them to YYYY-MM-DD:
@@ -1713,7 +1715,7 @@ const stageBadgeClass = {
 
 // ---------- Status read (coach summary at the top of a profile) ----------
 
-const COACH_PROMPT = `You are this man's dating coach. He is in his fifties, established, no time to waste. Write TO HIM, in the second person — "you", "she", "your". Never refer to him as "the user" or "he", and never write about him in the third person.
+const COACH_PROMPT = `You are this man's dating coach. He is in his fifties, established, no time to waste. Write TO HIM, in the second person — "you", "she", "your". Never refer to him as "the user", "he" or "him", and never write about him in the third person. This applies to every field you return, including the per-date notes.
 
 YOUR COACHING IS A BLEND OF FIVE SCHOOLS. Use whichever fits the evidence:
 - Doc Love (The System, The Dating Dictionary). INTEREST LEVEL is the core of your reading: her interest in you, 0 to 100, set by her behaviour and not talked into existence. His rules: be a Challenge, not a Wimp; she who cares less controls the relationship; never argue, complain or explain; do not buy her attention with gifts, compliments or long messages; let her invest; if she flakes twice her interest level is your answer; and when it is over, FIDO — forget it, drive on.
@@ -1758,8 +1760,9 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 {
 "interestLevel": integer 0-100 — for a live connection, her interest level now. For one that is over, her interest level at its highest point, which tells him what he was actually working with, judged from behaviour, not words. Be honest and specific rather than generous. If there is too little evidence, use 50 and say so in the status.
 "vibe": string — three to five words. For a live connection, the temperature now. For one that is over, what it amounted to, e.g. "Ran out of road", "She was never in it", "Good while it lasted", e.g. "High interest, moving fast", "Polite, low interest", "Cooling since the second date", "Too early to call".
-"status": string — 3-5 sentences addressed to him. If it is live, what is actually happening between you and her. If it is over, what happened and why, across the whole arc. Cite the concrete evidence: what he wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
-"recommendation": string — 2-4 sentences. If it is live, the single next move, why it works and what to avoid. If it is over, the lesson to carry forward: the pattern to watch for, the thing to do differently, or the standard to hold next time. Never suggest contacting a woman it is over with. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him to stop investing.
+"status": string — 3-5 sentences addressed to him. If it is live, what is actually happening between you and her. If it is over, what happened and why, across the whole arc. Cite the concrete evidence: what you wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
+"dateNotes": array of objects {"date": "YYYY-MM-DD", "read": string} — one entry for each COMPLETED date in the timeline, in date order. "read" is one or two sentences of YOUR interpretation of that particular meeting: what it tells you about her interest level and where things stood after it. Do not repeat your own notes back at you — you wrote them and can read them. Interpret them instead. If you wrote nothing about a date, say what that silence leaves unknown. Empty array if there are no completed dates.
+"recommendation": string — 2-4 sentences. If it is live, the single next move, why it works and what to avoid. If it is over, the lesson to carry forward: the pattern to watch for, the thing to do differently, or the standard to hold next time. Never suggest contacting a woman it is over with. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him plainly to stop investing.
 }
 Judge only on the facts given. Never invent a message, a date, a place or a feeling. No flattery, no hedging, no therapy-speak. Respond with the JSON object only.`;
 
@@ -1797,7 +1800,7 @@ function buildCoachContext(person) {
   lines.push('Name: ' + person.name);
   lines.push('Stage: ' + person.stage);
   lines.push('What this was: ' + classifyRelationship(person)
-    + (person.relType ? ' (his own classification)' : ' (judged from the record — challenge it if it looks wrong)'));
+    + (person.relType ? ' (your own classification)' : ' (judged from the record — challenge it if it looks wrong)'));
   if (startYm) {
     lines.push('Ran from ' + startYm + (endYm ? ' to ' + endYm : ' to now')
       + (span !== null ? ' — ' + formatSpan(span) : ''));
@@ -1809,9 +1812,9 @@ function buildCoachContext(person) {
         : ' — recently. Do not coach him back toward her.')
     : 'THIS ONE IS LIVE.');
   if (person.endReason) lines.push('How it ended: ' + person.endReason);
-  if (person.endNotes) lines.push('His account of the ending: ' + person.endNotes);
+  if (person.endNotes) lines.push('Your account of the ending: ' + person.endNotes);
   if (person.meetingChannel) lines.push('Met through: ' + person.meetingChannel);
-  if (person.dateMet) lines.push('Matched/connected: ' + person.dateMet + ' (' + daysBetween(person.dateMet, TODAY()) + ' days ago)');
+  if (person.dateMet) lines.push('You matched/connected: ' + person.dateMet + ' (' + daysBetween(person.dateMet, TODAY()) + ' days ago)');
   PROFILE_FIELDS.forEach(([k, label]) => { if (p[k]) lines.push(label + ': ' + p[k]); });
   if (p.currentLocation && p.location && normaliseMsg(p.currentLocation) !== normaliseMsg(p.location)
       && !normaliseMsg(p.currentLocation).includes(normaliseMsg(p.location))
@@ -1821,7 +1824,7 @@ function buildCoachContext(person) {
   if (p.interests.length) lines.push('Interests: ' + p.interests.join(', '));
   if (p.bio) lines.push('Her bio: ' + p.bio);
   p.prompts.forEach(pr => lines.push('Profile prompt — ' + (pr.question || 'prompt') + ': ' + pr.answer));
-  if (person.notes) lines.push('My notes: ' + person.notes);
+  if (person.notes) lines.push('Your notes on her: ' + person.notes);
 
   const dates = (person.dates || []).filter(d => d.status === 'Completed');
   if (!dates.length) lines.push('No completed dates — this has not moved offline yet.');
@@ -1841,9 +1844,9 @@ function buildCoachContext(person) {
             + ', connection ' + (d.connection || '–') + ', compatibility ' + (d.compatibility || '–') + ')' : '')
           + (d.outcome ? ' — outcome: ' + d.outcome : ''));
         if ((d.notes || '').trim()) {
-          lines.push('      HIS OWN ACCOUNT OF THIS DATE (the only record that exists of it): ' + d.notes.trim());
+          lines.push('      YOUR OWN ACCOUNT OF THIS DATE (the only record that exists of it): ' + d.notes.trim());
         } else if (d.status === 'Completed') {
-          lines.push('      He wrote nothing about this date, so nothing is known about how it went.');
+          lines.push('      You wrote nothing about this date, so nothing is known about how it went.');
         }
       }
     });
@@ -1859,8 +1862,17 @@ function buildCoachContext(person) {
       : 'you have never arranged a date with her — the interest level here is provisional, judged on messages only')
     + (cancelled ? '; ' + cancelled + ' cancelled or no-show' : '') + '.');
 
+  const sig = conversationSignals(person);
+  if (sig) {
+    lines.push('Measured message signals: ' + sig.total + ' logged lines, ' + sig.herShare + '% of them hers, '
+      + 'exchanged across ' + sig.conversationDays + ' separate day(s)'
+      + (sig.span !== null ? ' spanning ' + sig.span + ' days' : '')
+      + '. You opened the conversation on ' + sig.heOpened + ' of those days, she opened on ' + sig.sheOpened
+      + '. The last word was ' + (sig.lastSpeaker === 'him' ? 'yours' : 'hers') + '.');
+  }
+
   const missing = datesMissingDebrief(person);
-  if (missing.length) lines.push(missing.length + ' completed date(s) have no write-up.');
+  if (missing.length) lines.push(missing.length + ' completed date(s) have no write-up from you.');
 
   const quiet = daysQuiet(person);
   if (quiet !== null) lines.push('Days since last logged activity: ' + quiet);
@@ -1896,16 +1908,76 @@ async function generateCoachSummary(person) {
     vibe: String(result.vibe || '').trim(),
     status: String(result.status || '').trim(),
     recommendation: String(result.recommendation || '').trim(),
-    generatedAt: TODAY(),
+    generatedAt: new Date().toISOString(),
+    dateNotes: Array.isArray(result.dateNotes)
+      ? result.dateNotes.map(d => ({ date: String(d.date || '').slice(0, 10), read: String(d.read || '').trim() }))
+          .filter(d => d.date && d.read)
+      : [],
   };
+}
+
+function formatReadStamp(stamp) {
+  if (!stamp) return '';
+  const d = new Date(stamp.length <= 10 ? stamp + 'T00:00:00' : stamp);
+  if (isNaN(d)) return stamp;
+  const datePart = d.toLocaleDateString('en-IE', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  if (stamp.length <= 10) return datePart;
+  return datePart + ' at ' + d.toLocaleTimeString('en-IE', { hour: '2-digit', minute: '2-digit' });
+}
+
+// A 180-degree gauge — the number matters, but the needle position reads faster.
+function InterestGauge({ value, size }) {
+  const w = size || 132, h = w * 0.62;
+  const cx = w / 2, cy = h - 6, r = w / 2 - 12;
+  const v = Math.max(0, Math.min(100, Number(value) || 0));
+  const angle = Math.PI * (1 - v / 100);              // 180deg at 0, 0deg at 100
+  const nx = cx + Math.cos(angle) * (r - 6);
+  const ny = cy - Math.sin(angle) * (r - 6);
+  const arc = (from, to) => {
+    const a1 = Math.PI * (1 - from / 100), a2 = Math.PI * (1 - to / 100);
+    const x1 = cx + Math.cos(a1) * r, y1 = cy - Math.sin(a1) * r;
+    const x2 = cx + Math.cos(a2) * r, y2 = cy - Math.sin(a2) * r;
+    return `M ${x1} ${y1} A ${r} ${r} 0 0 1 ${x2} ${y2}`;
+  };
+  const bands = [
+    [0, 31, '#dc2626'],     // gone
+    [31, 51, '#f97316'],    // low
+    [51, 70, '#f59e0b'],    // lukewarm
+    [70, 90, '#65a30d'],    // interested
+    [90, 100, '#16a34a'],   // high
+  ];
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} role="img" aria-label={'Interest level ' + v + ' out of 100'}>
+      {bands.map(([a, b, colour]) => (
+        <path key={a} d={arc(a, b)} stroke={colour} strokeWidth="9" fill="none" strokeLinecap="butt" />
+      ))}
+      <line x1={cx} y1={cy} x2={nx} y2={ny} stroke="#1c1917" strokeWidth="2.5" strokeLinecap="round" />
+      <circle cx={cx} cy={cy} r="4" fill="#1c1917" />
+      <text x={cx} y={cy - r * 0.42} textAnchor="middle" fontSize={w * 0.19} fontWeight="600" fill="#1c1917">{v}</text>
+    </svg>
+  );
 }
 
 function StatusPanel({ read, busy, error, onRefresh, onOpenSettings }) {
   const needsKey = !Local.get('anthropic-api-key');
   return (
     <div className="bg-white border border-stone-200 rounded-lg p-4 mb-4">
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="text-sm font-semibold text-stone-700">Where this stands</h3>
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-stone-700">Where this stands</h3>
+          {read && typeof read.interestLevel === 'number' && (
+            <>
+              <InterestGauge value={read.interestLevel} />
+              <p className="text-[10px] uppercase tracking-wide text-stone-400 -mt-1">
+                Her interest level ·{' '}
+                {read.interestLevel >= 90 ? 'high, she makes it easy'
+                  : read.interestLevel >= 70 ? 'interested, you lead'
+                  : read.interestLevel >= 51 ? 'lukewarm'
+                  : read.interestLevel >= 31 ? 'low' : 'gone'}
+              </p>
+            </>
+          )}
+        </div>
         {needsKey ? (
           <button onClick={onOpenSettings}
             className="text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100">
@@ -1944,37 +2016,14 @@ function StatusPanel({ read, busy, error, onRefresh, onOpenSettings }) {
             )}
           </div>
           {typeof read.interestLevel !== 'number' && (
-            <p className="text-xs text-amber-700">
-              This read predates the interest-level score. Refresh to get one.
-            </p>
-          )}
-          {typeof read.interestLevel === 'number' && (
-            <div>
-              <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-stone-400 mb-1">
-                <span>Her interest level</span>
-                <span className="text-stone-700 font-semibold text-sm">{read.interestLevel}%</span>
-              </div>
-              <div className="h-2 bg-stone-100 rounded-full overflow-hidden">
-                <div className={`h-full ${
-                  read.interestLevel >= 90 ? 'bg-emerald-600'
-                    : read.interestLevel >= 70 ? 'bg-emerald-500'
-                    : read.interestLevel >= 51 ? 'bg-amber-500' : 'bg-red-600'
-                }`} style={{ width: read.interestLevel + '%' }} />
-              </div>
-              <p className="text-[10px] text-stone-400 mt-0.5">
-                {read.interestLevel >= 90 ? 'High — she makes it easy'
-                  : read.interestLevel >= 70 ? 'Decent, not certain'
-                  : read.interestLevel >= 51 ? 'Lukewarm — needs to move offline'
-                  : 'Low — effort here makes it worse'}
-              </p>
-            </div>
+            <p className="text-xs text-amber-700">This read predates the interest-level score. Refresh to get one.</p>
           )}
           <p className="text-sm text-stone-800">{read.status}</p>
           <div className="border-l-2 border-stone-900 pl-2.5">
             <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-0.5">Next move</div>
             <p className="text-sm text-stone-800">{read.recommendation}</p>
           </div>
-          <p className="text-[11px] text-stone-400">Read taken {read.generatedAt}.</p>
+          <p className="text-[11px] text-stone-400">Read taken {formatReadStamp(read.generatedAt)}.</p>
         </div>
       )}
     </div>
@@ -2276,16 +2325,6 @@ function RelationshipTracker() {
     if (!selected) return;
     await persist(peopleRef.current.map(p => p.id === selected.id ? { ...p, lastContact: TODAY() } : p));
     setNotice('Contact logged for ' + formatDayLabel(TODAY()) + '.');
-  }
-
-  async function swapConversationSpeakers() {
-    if (!selected) return;
-    const flip = arr => (arr || []).map(x => ({ ...x, from: x.from === 'me' ? 'she' : 'me' }));
-    const days = (selected.conversationDays || []).map(d => ({ ...d, points: flip(d.points) }));
-    await persist(people.map(p => p.id === selected.id
-      ? { ...p, conversationDays: days, conversationLog: flip(p.conversationLog) }
-      : p));
-    setNotice('Swapped — every line reattributed.');
   }
 
   async function clearConversation() {
@@ -2785,9 +2824,10 @@ function RelationshipTracker() {
             chronology={buildChronology(selected)}
             onAddFiles={addConversationFromFiles}
             onDelete={deleteConversationEntry}
-            onSwap={swapConversationSpeakers}
             onClear={clearConversation}
             onEditDate={startEditDate}
+            dateNotes={((selected.coachRead && selected.coachRead.dateNotes) || [])
+              .reduce((acc, d) => { acc[d.date] = d.read; return acc; }, {})}
             needsSummary={daysNeedingSummary(selected).length}
             onSummarise={rebuildDaySummaries}
           />
@@ -3921,7 +3961,7 @@ function groupPointsByDate(points) {
 
 
 
-function ConversationSection({ chronology, summary, onAddFiles, onDelete, onSwap, onClear, onEditDate, needsSummary, onSummarise }) {
+function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClear, onEditDate, needsSummary, onSummarise, dateNotes }) {
   const items = chronology || [];
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -3961,9 +4001,6 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onSwap
 
       {hasChat && (
         <div className="flex items-center gap-2 mb-3">
-          <button onClick={onSwap} className="text-xs text-stone-600 border border-stone-300 rounded px-2 py-1 hover:bg-stone-100">
-            Swap she / me
-          </button>
           {confirmClear ? (
             <>
               <button onClick={() => { setConfirmClear(false); onClear(); }}
@@ -4013,7 +4050,12 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onSwap
                 )}
 
                 {item.kind === 'date' ? (
-                  <DateTimelineCard entry={item.entry} isLatest={isLatest} onEdit={() => onEditDate(item.entry)} />
+                  <DateTimelineCard
+                    entry={item.entry}
+                    isLatest={isLatest}
+                    onEdit={() => onEditDate(item.entry)}
+                    coachNote={(dateNotes || {})[item.entry.date] || ''}
+                  />
                 ) : (
                   <div className={`rounded-lg border p-3 ${isLatest ? 'border-stone-900 bg-stone-50' : 'border-stone-200'}`}>
                     <div className="flex items-center justify-between gap-2 mb-1">
@@ -4078,9 +4120,9 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onSwap
   );
 }
 
-function DateTimelineCard({ entry, isLatest, onEdit }) {
+function DateTimelineCard({ entry, isLatest, onEdit, coachNote }) {
   const avg = overallAvg(entry);
-  const debrief = (entry.notes || '').trim();
+  const written = (entry.notes || '').trim();
   return (
     <div className={`rounded-lg border-2 p-3 ${isLatest ? 'border-stone-900 bg-stone-50' : 'border-stone-300'}`}>
       <div className="flex items-center justify-between gap-2 mb-1">
@@ -4100,16 +4142,18 @@ function DateTimelineCard({ entry, isLatest, onEdit }) {
       )}
       {entry.outcome && <p className="text-xs text-stone-600 mt-0.5">{entry.outcome}</p>}
 
-      {debrief ? (
+      {coachNote ? (
         <div className="mt-2 border-l-2 border-stone-900 pl-2.5">
-          <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-0.5">Your record</div>
-          <p className="text-sm text-stone-800 whitespace-pre-line">{debrief}</p>
+          <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-0.5">Coach's read</div>
+          <p className="text-sm text-stone-800">{coachNote}</p>
         </div>
-      ) : entry.status === 'Completed' ? (
+      ) : entry.status === 'Completed' && !written ? (
         <button onClick={onEdit}
           className="mt-2 w-full text-left text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-2">
           Nothing written about this one — and nothing else records it. Add your account.
         </button>
+      ) : entry.status === 'Completed' ? (
+        <p className="mt-2 text-xs text-stone-400">Written up — refresh the read for the coach's take on it.</p>
       ) : null}
     </div>
   );
@@ -5213,7 +5257,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 20:01';
+const BUILD_STAMP = '2026-08-02 20:25';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -5485,7 +5529,7 @@ function readIsStale(person) {
   const dates = (person.dates || []).map(d => d.date).filter(Boolean);
   const past = [lastActivity(person), person.lastContact, ...dates].filter(Boolean).filter(d => d <= today).sort();
   const latest = past.length ? past[past.length - 1] : '';
-  return !!latest && latest > read.generatedAt;
+  return !!latest && latest > String(read.generatedAt).slice(0, 10);
 }
 
 // The recommendation trimmed to its first sentence, for the home card.
@@ -5656,10 +5700,10 @@ function migrateConversationLog(log) {
   out.sort((a, b) => (a.date || '9999-12-31').localeCompare(b.date || '9999-12-31'));
   return out;
 }
-const DAY_SUMMARY_PROMPT = `Below is one day's worth of an already-condensed chat log between a man and a woman he is dating. "Me" is him, "She" is her. Turn it into a record entry. Respond with ONLY a JSON object, no other text, no markdown fences:
+const DAY_SUMMARY_PROMPT = `Below is one day's worth of an already-condensed chat log between the reader and a woman he is dating. "Me" is the reader, "She" is her. This is his own private record, so write it TO HIM in the second person — "you" and "she", never "he", "him" or "the user". Respond with ONLY a JSON object, no other text, no markdown fences:
 {
-"summary": string — two or three sentences on what this exchange was about and how it went between them.
-"facts": array of short strings — the things worth remembering: what she revealed about her life, work, family, plans or opinions; anything agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, compliments and other small talk. Empty array if it was all small talk.
+"summary": string — two or three sentences addressed to him on what this exchange was about and how it went between you and her. For example: "You opened about her hiking photo and she came back warmly, though she kept it brief." Never write about him in the third person.
+"facts": array of short strings — the things worth remembering, written to him: what she revealed about her life, work, family, plans or opinions; anything you agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, compliments and other small talk. Empty array if it was all small talk.
 }
 Work only from the lines given. Do not invent anything. Respond with the JSON object only.`;
 async function summariseDay(day, personName) {
@@ -5861,7 +5905,7 @@ function fileToBase64(file) {
   });
 }
 const PERSON_EXTRACT_PROMPT = `This is a screenshot from a dating app or messaging app (match screen, profile, or chat history). Extract what you can and respond with ONLY a JSON object, no other text, no markdown code fences, in exactly this shape:
-{"name": string or null, "meetingChannel": string or null (the app name if identifiable, e.g. Hinge, Tinder, Bumble, Instagram, WhatsApp), "dateMet": string or null (YYYY-MM-DD if a date is visible or can reasonably be inferred, else null), "summary": string or null (1-2 sentence summary of anything useful for a personal dating log — interests mentioned, tone of conversation, etc.)}
+{"name": string or null, "meetingChannel": string or null (the app name if identifiable, e.g. Hinge, Tinder, Bumble, Instagram, WhatsApp), "dateMet": string or null (YYYY-MM-DD if a date is visible or can reasonably be inferred, else null), "summary": string or null (1-2 sentence summary for his personal dating log, written to him in the second person — "you" and "she", never "he")}
 If a field can't be determined, use null for it. Respond with the JSON object only.`;
 const DATE_EXTRACT_PROMPT = `This is a screenshot of a chat conversation, likely about making plans to meet up. Extract what you can and respond with ONLY a JSON object, no other text, no markdown code fences, in exactly this shape:
 {"venue": string or null (a place name mentioned, if any), "proposedDate": string or null (YYYY-MM-DD if a date is visible or can reasonably be inferred, else null), "summary": string or null (1-2 sentence summary of the plan discussed)}
@@ -5922,7 +5966,9 @@ THE THREE LOCATION FIELDS ARE DIFFERENT THINGS. Work through them like this:
 - Second example. Profile shows only "Gráinne, 44" and "Galway" under her name. Correct answer: location "Galway", hometown null, currentLocation null, distanceAway null.
 
 Use null for any single-value field you cannot determine, and an empty array for any list. Do not invent anything. Respond with the JSON object only.`;
-const CONVERSATION_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of ONE tall screenshot of a chat conversation, given top to bottom (oldest first). It could be any messaging app — WhatsApp, iMessage, Bumble, Hinge, Instagram. The user is a man; the other person is a woman.
+const CONVERSATION_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of ONE tall screenshot of a chat conversation, given top to bottom (oldest first). It could be any messaging app — WhatsApp, iMessage, Bumble, Hinge, Instagram. You are reading this on behalf of the man whose phone it is; the other person is a woman.
+
+WRITE EVERYTHING TO HIM, IN THE SECOND PERSON. This is his own private record. Summaries and facts say "you" and "she" — never "he", "him", "the user", or "they" meaning the pair of you. "You asked about her weekend and she took a day to reply", not "He asked about her weekend".
 
 WORK OUT WHO IS WHO BEFORE YOU SUMMARISE. This is the part that goes wrong most often, so do it deliberately:
 - The name in the chat header is HER. Any message signed, addressed to, or greeting that name was written by the user, not her.
@@ -5945,12 +5991,12 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
   {
     "dayLabel": string or null (the divider exactly as printed above this session, e.g. "Today", "14 July"),
     "date": string or null (YYYY-MM-DD. RESOLVE THE DIVIDER — see the dating rules below. Null only if this session has no day information of any kind above it.),
-    "summary": string — two or three sentences on what this session was actually about and how it went. Written about them, not as a transcript.
+    "summary": string — two or three sentences addressed to him on what this session was about and how it went between you and her. Second person throughout. Not a transcript.
     "facts": array of short strings — the things worth remembering: what she revealed about her life, work, family, plans or opinions; anything agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, "how was your day", compliments and other small talk. Empty array if the session was pure small talk.
     "points": array of {"from": "she" or "me", "point": string, "timeLabel": string or null} — the underlying chronology, one condensed line per meaningful exchange of about 8-15 words, in order. This is the detail behind the summary.
   }
 "dateEvents": array of objects {"date": string or null (YYYY-MM-DD if determinable), "dayText": string or null, "timeText": string or null, "venue": string or null, "activity": string or null, "status": "proposed" or "agreed" or "happened" or "cancelled", "proposedBy": "she" or "me" or null} — every meeting between them the chat discusses. Only where a day, a place or a specific activity is named; never from vague talk of meeting sometime.
-"summary": string — two or three sentences on where the whole conversation stands: tone, momentum, anything agreed or left open.
+"summary": string — two or three sentences addressed to him on where the whole conversation stands: tone, momentum, anything agreed or left open. Second person throughout.
 "phoneNumbers": array of strings.
 }
 RESOLVING DATES. You are told today's date below. Chat apps write dividers in several styles and you must convert every one of them to YYYY-MM-DD:
@@ -6711,7 +6757,7 @@ const stageBadgeClass = {
 
 // ---------- Status read (coach summary at the top of a profile) ----------
 
-const COACH_PROMPT = `You are this man's dating coach. He is in his fifties, established, no time to waste. Write TO HIM, in the second person — "you", "she", "your". Never refer to him as "the user" or "he", and never write about him in the third person.
+const COACH_PROMPT = `You are this man's dating coach. He is in his fifties, established, no time to waste. Write TO HIM, in the second person — "you", "she", "your". Never refer to him as "the user", "he" or "him", and never write about him in the third person. This applies to every field you return, including the per-date notes.
 
 YOUR COACHING IS A BLEND OF FIVE SCHOOLS. Use whichever fits the evidence:
 - Doc Love (The System, The Dating Dictionary). INTEREST LEVEL is the core of your reading: her interest in you, 0 to 100, set by her behaviour and not talked into existence. His rules: be a Challenge, not a Wimp; she who cares less controls the relationship; never argue, complain or explain; do not buy her attention with gifts, compliments or long messages; let her invest; if she flakes twice her interest level is your answer; and when it is over, FIDO — forget it, drive on.
@@ -6756,8 +6802,9 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 {
 "interestLevel": integer 0-100 — for a live connection, her interest level now. For one that is over, her interest level at its highest point, which tells him what he was actually working with, judged from behaviour, not words. Be honest and specific rather than generous. If there is too little evidence, use 50 and say so in the status.
 "vibe": string — three to five words. For a live connection, the temperature now. For one that is over, what it amounted to, e.g. "Ran out of road", "She was never in it", "Good while it lasted", e.g. "High interest, moving fast", "Polite, low interest", "Cooling since the second date", "Too early to call".
-"status": string — 3-5 sentences addressed to him. If it is live, what is actually happening between you and her. If it is over, what happened and why, across the whole arc. Cite the concrete evidence: what he wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
-"recommendation": string — 2-4 sentences. If it is live, the single next move, why it works and what to avoid. If it is over, the lesson to carry forward: the pattern to watch for, the thing to do differently, or the standard to hold next time. Never suggest contacting a woman it is over with. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him to stop investing.
+"status": string — 3-5 sentences addressed to him. If it is live, what is actually happening between you and her. If it is over, what happened and why, across the whole arc. Cite the concrete evidence: what you wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
+"dateNotes": array of objects {"date": "YYYY-MM-DD", "read": string} — one entry for each COMPLETED date in the timeline, in date order. "read" is one or two sentences of YOUR interpretation of that particular meeting: what it tells you about her interest level and where things stood after it. Do not repeat your own notes back at you — you wrote them and can read them. Interpret them instead. If you wrote nothing about a date, say what that silence leaves unknown. Empty array if there are no completed dates.
+"recommendation": string — 2-4 sentences. If it is live, the single next move, why it works and what to avoid. If it is over, the lesson to carry forward: the pattern to watch for, the thing to do differently, or the standard to hold next time. Never suggest contacting a woman it is over with. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him plainly to stop investing.
 }
 Judge only on the facts given. Never invent a message, a date, a place or a feeling. No flattery, no hedging, no therapy-speak. Respond with the JSON object only.`;
 
@@ -6800,15 +6847,15 @@ function buildCoachContext(person) {
     endYm = relEndYm(person);
   lines.push('Name: ' + person.name);
   lines.push('Stage: ' + person.stage);
-  lines.push('What this was: ' + classifyRelationship(person) + (person.relType ? ' (his own classification)' : ' (judged from the record — challenge it if it looks wrong)'));
+  lines.push('What this was: ' + classifyRelationship(person) + (person.relType ? ' (your own classification)' : ' (judged from the record — challenge it if it looks wrong)'));
   if (startYm) {
     lines.push('Ran from ' + startYm + (endYm ? ' to ' + endYm : ' to now') + (span !== null ? ' — ' + formatSpan(span) : ''));
   }
   lines.push(closure.closed ? 'THIS ONE IS OVER. ' + closure.label + (closure.monthsAgo !== null && closure.monthsAgo > 2 ? ' — treat this as a post-mortem for the record, not a live case. Do not suggest contacting her.' : ' — recently. Do not coach him back toward her.') : 'THIS ONE IS LIVE.');
   if (person.endReason) lines.push('How it ended: ' + person.endReason);
-  if (person.endNotes) lines.push('His account of the ending: ' + person.endNotes);
+  if (person.endNotes) lines.push('Your account of the ending: ' + person.endNotes);
   if (person.meetingChannel) lines.push('Met through: ' + person.meetingChannel);
-  if (person.dateMet) lines.push('Matched/connected: ' + person.dateMet + ' (' + daysBetween(person.dateMet, TODAY()) + ' days ago)');
+  if (person.dateMet) lines.push('You matched/connected: ' + person.dateMet + ' (' + daysBetween(person.dateMet, TODAY()) + ' days ago)');
   PROFILE_FIELDS.forEach(([k, label]) => {
     if (p[k]) lines.push(label + ': ' + p[k]);
   });
@@ -6818,7 +6865,7 @@ function buildCoachContext(person) {
   if (p.interests.length) lines.push('Interests: ' + p.interests.join(', '));
   if (p.bio) lines.push('Her bio: ' + p.bio);
   p.prompts.forEach(pr => lines.push('Profile prompt — ' + (pr.question || 'prompt') + ': ' + pr.answer));
-  if (person.notes) lines.push('My notes: ' + person.notes);
+  if (person.notes) lines.push('Your notes on her: ' + person.notes);
   const dates = (person.dates || []).filter(d => d.status === 'Completed');
   if (!dates.length) lines.push('No completed dates — this has not moved offline yet.');
   const chron = buildChronology(person);
@@ -6833,9 +6880,9 @@ function buildCoachContext(person) {
         const avg = overallAvg(d);
         lines.push('  ' + d.date + ' MET IN PERSON (' + d.status + ') — ' + (d.location || 'venue not recorded') + (avg !== null ? ' — rated ' + avg.toFixed(1) + '/5 (chemistry ' + (d.chemistry || '–') + ', connection ' + (d.connection || '–') + ', compatibility ' + (d.compatibility || '–') + ')' : '') + (d.outcome ? ' — outcome: ' + d.outcome : ''));
         if ((d.notes || '').trim()) {
-          lines.push('      HIS OWN ACCOUNT OF THIS DATE (the only record that exists of it): ' + d.notes.trim());
+          lines.push('      YOUR OWN ACCOUNT OF THIS DATE (the only record that exists of it): ' + d.notes.trim());
         } else if (d.status === 'Completed') {
-          lines.push('      He wrote nothing about this date, so nothing is known about how it went.');
+          lines.push('      You wrote nothing about this date, so nothing is known about how it went.');
         }
       }
     });
@@ -6844,8 +6891,12 @@ function buildCoachContext(person) {
   const cancelled = (person.dates || []).filter(d => d.status === 'Cancelled' || d.status === 'No show').length;
   const everArranged = (person.dates || []).length > 0;
   lines.push('Meeting status: ' + (met ? 'you have met in person ' + met + ' time(s)' : everArranged ? 'a date has been arranged but none completed yet' : 'you have never arranged a date with her — the interest level here is provisional, judged on messages only') + (cancelled ? '; ' + cancelled + ' cancelled or no-show' : '') + '.');
+  const sig = conversationSignals(person);
+  if (sig) {
+    lines.push('Measured message signals: ' + sig.total + ' logged lines, ' + sig.herShare + '% of them hers, ' + 'exchanged across ' + sig.conversationDays + ' separate day(s)' + (sig.span !== null ? ' spanning ' + sig.span + ' days' : '') + '. You opened the conversation on ' + sig.heOpened + ' of those days, she opened on ' + sig.sheOpened + '. The last word was ' + (sig.lastSpeaker === 'him' ? 'yours' : 'hers') + '.');
+  }
   const missing = datesMissingDebrief(person);
-  if (missing.length) lines.push(missing.length + ' completed date(s) have no write-up.');
+  if (missing.length) lines.push(missing.length + ' completed date(s) have no write-up from you.');
   const quiet = daysQuiet(person);
   if (quiet !== null) lines.push('Days since last logged activity: ' + quiet);
   const next = (person.dates || []).find(d => d.status === 'Upcoming' && d.date >= TODAY());
@@ -6881,8 +6932,97 @@ async function generateCoachSummary(person) {
     vibe: String(result.vibe || '').trim(),
     status: String(result.status || '').trim(),
     recommendation: String(result.recommendation || '').trim(),
-    generatedAt: TODAY()
+    generatedAt: new Date().toISOString(),
+    dateNotes: Array.isArray(result.dateNotes) ? result.dateNotes.map(d => ({
+      date: String(d.date || '').slice(0, 10),
+      read: String(d.read || '').trim()
+    })).filter(d => d.date && d.read) : []
   };
+}
+function formatReadStamp(stamp) {
+  if (!stamp) return '';
+  const d = new Date(stamp.length <= 10 ? stamp + 'T00:00:00' : stamp);
+  if (isNaN(d)) return stamp;
+  const datePart = d.toLocaleDateString('en-IE', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+  });
+  if (stamp.length <= 10) return datePart;
+  return datePart + ' at ' + d.toLocaleTimeString('en-IE', {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+// A 180-degree gauge — the number matters, but the needle position reads faster.
+function InterestGauge({
+  value,
+  size
+}) {
+  const w = size || 132,
+    h = w * 0.62;
+  const cx = w / 2,
+    cy = h - 6,
+    r = w / 2 - 12;
+  const v = Math.max(0, Math.min(100, Number(value) || 0));
+  const angle = Math.PI * (1 - v / 100); // 180deg at 0, 0deg at 100
+  const nx = cx + Math.cos(angle) * (r - 6);
+  const ny = cy - Math.sin(angle) * (r - 6);
+  const arc = (from, to) => {
+    const a1 = Math.PI * (1 - from / 100),
+      a2 = Math.PI * (1 - to / 100);
+    const x1 = cx + Math.cos(a1) * r,
+      y1 = cy - Math.sin(a1) * r;
+    const x2 = cx + Math.cos(a2) * r,
+      y2 = cy - Math.sin(a2) * r;
+    return `M ${x1} ${y1} A ${r} ${r} 0 0 1 ${x2} ${y2}`;
+  };
+  const bands = [[0, 31, '#dc2626'],
+  // gone
+  [31, 51, '#f97316'],
+  // low
+  [51, 70, '#f59e0b'],
+  // lukewarm
+  [70, 90, '#65a30d'],
+  // interested
+  [90, 100, '#16a34a'] // high
+  ];
+  return /*#__PURE__*/React.createElement("svg", {
+    width: w,
+    height: h,
+    viewBox: `0 0 ${w} ${h}`,
+    role: "img",
+    "aria-label": 'Interest level ' + v + ' out of 100'
+  }, bands.map(([a, b, colour]) => /*#__PURE__*/React.createElement("path", {
+    key: a,
+    d: arc(a, b),
+    stroke: colour,
+    strokeWidth: "9",
+    fill: "none",
+    strokeLinecap: "butt"
+  })), /*#__PURE__*/React.createElement("line", {
+    x1: cx,
+    y1: cy,
+    x2: nx,
+    y2: ny,
+    stroke: "#1c1917",
+    strokeWidth: "2.5",
+    strokeLinecap: "round"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: cx,
+    cy: cy,
+    r: "4",
+    fill: "#1c1917"
+  }), /*#__PURE__*/React.createElement("text", {
+    x: cx,
+    y: cy - r * 0.42,
+    textAnchor: "middle",
+    fontSize: w * 0.19,
+    fontWeight: "600",
+    fill: "#1c1917"
+  }, v));
 }
 function StatusPanel({
   read,
@@ -6895,10 +7035,16 @@ function StatusPanel({
   return /*#__PURE__*/React.createElement("div", {
     className: "bg-white border border-stone-200 rounded-lg p-4 mb-4"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center justify-between mb-2"
+    className: "flex items-start justify-between gap-3 mb-2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "min-w-0"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "text-sm font-semibold text-stone-700"
-  }, "Where this stands"), needsKey ? /*#__PURE__*/React.createElement("button", {
+  }, "Where this stands"), read && typeof read.interestLevel === 'number' && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(InterestGauge, {
+    value: read.interestLevel
+  }), /*#__PURE__*/React.createElement("p", {
+    className: "text-[10px] uppercase tracking-wide text-stone-400 -mt-1"
+  }, "Her interest level ·", ' ', read.interestLevel >= 90 ? 'high, she makes it easy' : read.interestLevel >= 70 ? 'interested, you lead' : read.interestLevel >= 51 ? 'lukewarm' : read.interestLevel >= 31 ? 'low' : 'gone'))), needsKey ? /*#__PURE__*/React.createElement("button", {
     onClick: onOpenSettings,
     className: "text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100"
   }, "Add API key") : /*#__PURE__*/React.createElement("button", {
@@ -6922,20 +7068,7 @@ function StatusPanel({
     className: "text-[11px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2.5 py-1"
   }, read.vibe)), typeof read.interestLevel !== 'number' && /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-amber-700"
-  }, "This read predates the interest-level score. Refresh to get one."), typeof read.interestLevel === 'number' && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center justify-between text-[10px] uppercase tracking-wide text-stone-400 mb-1"
-  }, /*#__PURE__*/React.createElement("span", null, "Her interest level"), /*#__PURE__*/React.createElement("span", {
-    className: "text-stone-700 font-semibold text-sm"
-  }, read.interestLevel, "%")), /*#__PURE__*/React.createElement("div", {
-    className: "h-2 bg-stone-100 rounded-full overflow-hidden"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: `h-full ${read.interestLevel >= 90 ? 'bg-emerald-600' : read.interestLevel >= 70 ? 'bg-emerald-500' : read.interestLevel >= 51 ? 'bg-amber-500' : 'bg-red-600'}`,
-    style: {
-      width: read.interestLevel + '%'
-    }
-  })), /*#__PURE__*/React.createElement("p", {
-    className: "text-[10px] text-stone-400 mt-0.5"
-  }, read.interestLevel >= 90 ? 'High — she makes it easy' : read.interestLevel >= 70 ? 'Decent, not certain' : read.interestLevel >= 51 ? 'Lukewarm — needs to move offline' : 'Low — effort here makes it worse')), /*#__PURE__*/React.createElement("p", {
+  }, "This read predates the interest-level score. Refresh to get one."), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-800"
   }, read.status), /*#__PURE__*/React.createElement("div", {
     className: "border-l-2 border-stone-900 pl-2.5"
@@ -6945,7 +7078,7 @@ function StatusPanel({
     className: "text-sm text-stone-800"
   }, read.recommendation)), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-stone-400"
-  }, "Read taken ", read.generatedAt, ".")));
+  }, "Read taken ", formatReadStamp(read.generatedAt), ".")));
 }
 
 // ---------- Crash guard ----------
@@ -7315,23 +7448,6 @@ function RelationshipTracker() {
       lastContact: TODAY()
     } : p));
     setNotice('Contact logged for ' + formatDayLabel(TODAY()) + '.');
-  }
-  async function swapConversationSpeakers() {
-    if (!selected) return;
-    const flip = arr => (arr || []).map(x => ({
-      ...x,
-      from: x.from === 'me' ? 'she' : 'me'
-    }));
-    const days = (selected.conversationDays || []).map(d => ({
-      ...d,
-      points: flip(d.points)
-    }));
-    await persist(people.map(p => p.id === selected.id ? {
-      ...p,
-      conversationDays: days,
-      conversationLog: flip(p.conversationLog)
-    } : p));
-    setNotice('Swapped — every line reattributed.');
   }
   async function clearConversation() {
     if (!selected) return;
@@ -7872,9 +7988,12 @@ function RelationshipTracker() {
       chronology: buildChronology(selected),
       onAddFiles: addConversationFromFiles,
       onDelete: deleteConversationEntry,
-      onSwap: swapConversationSpeakers,
       onClear: clearConversation,
       onEditDate: startEditDate,
+      dateNotes: (selected.coachRead && selected.coachRead.dateNotes || []).reduce((acc, d) => {
+        acc[d.date] = d.read;
+        return acc;
+      }, {}),
       needsSummary: daysNeedingSummary(selected).length,
       onSummarise: rebuildDaySummaries
     }), (selected.dateSuggestions || []).length > 0 && /*#__PURE__*/React.createElement(DateSuggestions, {
@@ -9314,11 +9433,11 @@ function ConversationSection({
   summary,
   onAddFiles,
   onDelete,
-  onSwap,
   onClear,
   onEditDate,
   needsSummary,
-  onSummarise
+  onSummarise,
+  dateNotes
 }) {
   const items = chronology || [];
   const [busy, setBusy] = useState(false);
@@ -9364,10 +9483,7 @@ function ConversationSection({
     className: "text-xs text-red-700 mb-2"
   }, err), hasChat && /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-2 mb-3"
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: onSwap,
-    className: "text-xs text-stone-600 border border-stone-300 rounded px-2 py-1 hover:bg-stone-100"
-  }, "Swap she / me"), confirmClear ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+  }, confirmClear ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setConfirmClear(false);
       onClear();
@@ -9410,7 +9526,8 @@ function ConversationSection({
     })), item.kind === 'date' ? /*#__PURE__*/React.createElement(DateTimelineCard, {
       entry: item.entry,
       isLatest: isLatest,
-      onEdit: () => onEditDate(item.entry)
+      onEdit: () => onEditDate(item.entry),
+      coachNote: (dateNotes || {})[item.entry.date] || ''
     }) : /*#__PURE__*/React.createElement("div", {
       className: `rounded-lg border p-3 ${isLatest ? 'border-stone-900 bg-stone-50' : 'border-stone-200'}`
     }, /*#__PURE__*/React.createElement("div", {
@@ -9460,10 +9577,11 @@ function ConversationSection({
 function DateTimelineCard({
   entry,
   isLatest,
-  onEdit
+  onEdit,
+  coachNote
 }) {
   const avg = overallAvg(entry);
-  const debrief = (entry.notes || '').trim();
+  const written = (entry.notes || '').trim();
   return /*#__PURE__*/React.createElement("div", {
     className: `rounded-lg border-2 p-3 ${isLatest ? 'border-stone-900 bg-stone-50' : 'border-stone-300'}`
   }, /*#__PURE__*/React.createElement("div", {
@@ -9481,16 +9599,18 @@ function DateTimelineCard({
     className: "text-xs text-stone-500 mt-0.5"
   }, avg.toFixed(1), "/5 — chemistry ", entry.chemistry || '–', ", connection ", entry.connection || '–', ", compatibility ", entry.compatibility || '–'), entry.outcome && /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-stone-600 mt-0.5"
-  }, entry.outcome), debrief ? /*#__PURE__*/React.createElement("div", {
+  }, entry.outcome), coachNote ? /*#__PURE__*/React.createElement("div", {
     className: "mt-2 border-l-2 border-stone-900 pl-2.5"
   }, /*#__PURE__*/React.createElement("div", {
     className: "text-[10px] uppercase tracking-wide text-stone-400 mb-0.5"
-  }, "Your record"), /*#__PURE__*/React.createElement("p", {
-    className: "text-sm text-stone-800 whitespace-pre-line"
-  }, debrief)) : entry.status === 'Completed' ? /*#__PURE__*/React.createElement("button", {
+  }, "Coach's read"), /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-800"
+  }, coachNote)) : entry.status === 'Completed' && !written ? /*#__PURE__*/React.createElement("button", {
     onClick: onEdit,
     className: "mt-2 w-full text-left text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-2"
-  }, "Nothing written about this one — and nothing else records it. Add your account.") : null);
+  }, "Nothing written about this one — and nothing else records it. Add your account.") : entry.status === 'Completed' ? /*#__PURE__*/React.createElement("p", {
+    className: "mt-2 text-xs text-stone-400"
+  }, "Written up — refresh the read for the coach's take on it.") : null);
 }
 
 // ---------- Profile import modal (creates a new person from a screenshot) ----------
