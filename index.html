@@ -358,7 +358,7 @@ const { useState, useEffect, useMemo } = React;
 // ---------- Constants ----------
 
 const STAGES = ['Talking Stage', 'Dating', 'Relationship', 'Ended'];
-const DATE_STATUSES = ['Upcoming', 'Completed', 'Cancelled', 'No show'];
+const DATE_STATUSES = ['Upcoming', 'Completed', 'Proposed', 'Cancelled', 'No show'];
 const END_REASONS = ['Ghosted', 'They ended it', 'I ended it', 'Mutual', 'Moved away', 'Other'];
 const COMMON_CHANNELS = ['Hinge', 'Tinder', 'Bumble', 'In person', 'Through friends', 'Work', 'Other'];
 
@@ -395,7 +395,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 20:25';
+const BUILD_STAMP = '2026-08-02 20:31';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -1839,7 +1839,12 @@ function buildCoachContext(person) {
       } else {
         const d = item.entry;
         const avg = overallAvg(d);
-        lines.push('  ' + d.date + ' MET IN PERSON (' + d.status + ') — ' + (d.location || 'venue not recorded')
+        const kind = d.status === 'Completed' ? 'MET IN PERSON'
+          : d.status === 'Proposed' ? 'MEETING SUGGESTED BUT NEVER HAPPENED'
+          : d.status === 'Cancelled' ? 'DATE ARRANGED THEN CANCELLED'
+          : d.status === 'No show' ? 'DATE ARRANGED, SHE DID NOT SHOW'
+          : 'DATE BOOKED, NOT YET HAPPENED';
+        lines.push('  ' + d.date + ' ' + kind + ' — ' + (d.location || 'venue not recorded')
           + (avg !== null ? ' — rated ' + avg.toFixed(1) + '/5 (chemistry ' + (d.chemistry || '–')
             + ', connection ' + (d.connection || '–') + ', compatibility ' + (d.compatibility || '–') + ')' : '')
           + (d.outcome ? ' — outcome: ' + d.outcome : ''));
@@ -1847,6 +1852,8 @@ function buildCoachContext(person) {
           lines.push('      YOUR OWN ACCOUNT OF THIS DATE (the only record that exists of it): ' + d.notes.trim());
         } else if (d.status === 'Completed') {
           lines.push('      You wrote nothing about this date, so nothing is known about how it went.');
+        } else if (d.status === 'Proposed') {
+          lines.push('      This never became a fixed arrangement. Read that as a signal, not as a date.');
         }
       }
     });
@@ -1854,7 +1861,13 @@ function buildCoachContext(person) {
 
   const met = (person.dates || []).filter(d => d.status === 'Completed').length;
   const cancelled = (person.dates || []).filter(d => d.status === 'Cancelled' || d.status === 'No show').length;
+  const neverHappened = (person.dates || []).filter(d => d.status === 'Proposed').length;
   const everArranged = (person.dates || []).length > 0;
+  if (neverHappened) {
+    lines.push(neverHappened + ' meeting(s) were floated in the chat but never happened — no agreed date, or it faded. '
+      + 'These do not count as dates, but they are strong evidence about her interest level: a woman with high interest '
+      + 'converts a suggestion into a fixed arrangement.');
+  }
   lines.push('Meeting status: ' + (met
     ? 'you have met in person ' + met + ' time(s)'
     : everArranged
@@ -2529,7 +2542,11 @@ function RelationshipTracker() {
       id: 'd-' + Date.now() + Math.random().toString(36).slice(2, 5),
       location: sug.venue || sug.activity || 'TBC',
       date: sug.date || '',
-      status: sug.status === 'cancelled' ? 'Cancelled' : sug.status === 'happened' || isPast ? 'Completed' : 'Upcoming',
+      status: sug.status === 'cancelled' ? 'Cancelled'
+        : sug.status === 'happened' ? 'Completed'
+        // Only ever discussed, and the day has gone by: it never happened.
+        : sug.status === 'proposed' && (!sug.date || isPast) ? 'Proposed'
+        : isPast ? 'Completed' : 'Upcoming',
       venues: sug.venue || '',
       chemistry: 0, connection: 0, compatibility: 0,
       outcome: '',
@@ -3457,7 +3474,7 @@ function DateFormModal({ form, setForm, isNew, onCancel, onSave }) {
           onFocus={focusScroll} style={fieldScrollMargin}
           className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
       </Field>
-      <Field label="Status" hint="Date number is worked out automatically — Cancelled and No show don't count.">
+      <Field label="Status" hint="Date number is worked out automatically. Proposed, Cancelled and No show don't count as dates — they stay on the timeline as evidence.">
         <select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}
           onFocus={focusScroll} style={fieldScrollMargin}
           className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900">
@@ -4123,17 +4140,27 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClea
 function DateTimelineCard({ entry, isLatest, onEdit, coachNote }) {
   const avg = overallAvg(entry);
   const written = (entry.notes || '').trim();
+  // A meeting that never happened belongs on the timeline as evidence, but it
+  // should not look like one that did.
+  const happened = entry.status === 'Completed';
   return (
-    <div className={`rounded-lg border-2 p-3 ${isLatest ? 'border-stone-900 bg-stone-50' : 'border-stone-300'}`}>
+    <div className={`rounded-lg p-3 ${happened
+      ? 'border-2 ' + (isLatest ? 'border-stone-900 bg-stone-50' : 'border-stone-300')
+      : 'border border-dashed border-stone-300 bg-stone-50/50'}`}>
       <div className="flex items-center justify-between gap-2 mb-1">
-        <span className="text-xs font-semibold text-stone-900 flex items-center gap-1.5">
+        <span className={`text-xs font-semibold flex items-center gap-1.5 ${happened ? 'text-stone-900' : 'text-stone-500'}`}>
           <MapPin className="w-3.5 h-3.5" />
-          {formatDayLabel(entry.date)} · {entry.status === 'Completed' ? 'met in person' : entry.status.toLowerCase()}
+          {formatDayLabel(entry.date)} · {entry.status === 'Completed' ? 'met in person'
+            : entry.status === 'Proposed' ? 'suggested, never happened'
+            : entry.status === 'Upcoming' ? 'booked'
+            : entry.status.toLowerCase()}
         </span>
         <button onClick={onEdit} className="text-xs text-stone-500 hover:text-stone-900 shrink-0">Edit</button>
       </div>
 
-      <p className="text-sm text-stone-800 font-medium">{entry.location || 'Venue not recorded'}</p>
+      <p className={`text-sm font-medium ${happened ? 'text-stone-800' : 'text-stone-500'}`}>
+        {entry.location || 'Venue not recorded'}
+      </p>
 
       {avg !== null && (
         <p className="text-xs text-stone-500 mt-0.5">
@@ -5179,7 +5206,7 @@ const {
 // ---------- Constants ----------
 
 const STAGES = ['Talking Stage', 'Dating', 'Relationship', 'Ended'];
-const DATE_STATUSES = ['Upcoming', 'Completed', 'Cancelled', 'No show'];
+const DATE_STATUSES = ['Upcoming', 'Completed', 'Proposed', 'Cancelled', 'No show'];
 const END_REASONS = ['Ghosted', 'They ended it', 'I ended it', 'Mutual', 'Moved away', 'Other'];
 const COMMON_CHANNELS = ['Hinge', 'Tinder', 'Bumble', 'In person', 'Through friends', 'Work', 'Other'];
 const emptyPersonForm = {
@@ -5257,7 +5284,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 20:25';
+const BUILD_STAMP = '2026-08-02 20:31';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -6878,18 +6905,25 @@ function buildCoachContext(person) {
       } else {
         const d = item.entry;
         const avg = overallAvg(d);
-        lines.push('  ' + d.date + ' MET IN PERSON (' + d.status + ') — ' + (d.location || 'venue not recorded') + (avg !== null ? ' — rated ' + avg.toFixed(1) + '/5 (chemistry ' + (d.chemistry || '–') + ', connection ' + (d.connection || '–') + ', compatibility ' + (d.compatibility || '–') + ')' : '') + (d.outcome ? ' — outcome: ' + d.outcome : ''));
+        const kind = d.status === 'Completed' ? 'MET IN PERSON' : d.status === 'Proposed' ? 'MEETING SUGGESTED BUT NEVER HAPPENED' : d.status === 'Cancelled' ? 'DATE ARRANGED THEN CANCELLED' : d.status === 'No show' ? 'DATE ARRANGED, SHE DID NOT SHOW' : 'DATE BOOKED, NOT YET HAPPENED';
+        lines.push('  ' + d.date + ' ' + kind + ' — ' + (d.location || 'venue not recorded') + (avg !== null ? ' — rated ' + avg.toFixed(1) + '/5 (chemistry ' + (d.chemistry || '–') + ', connection ' + (d.connection || '–') + ', compatibility ' + (d.compatibility || '–') + ')' : '') + (d.outcome ? ' — outcome: ' + d.outcome : ''));
         if ((d.notes || '').trim()) {
           lines.push('      YOUR OWN ACCOUNT OF THIS DATE (the only record that exists of it): ' + d.notes.trim());
         } else if (d.status === 'Completed') {
           lines.push('      You wrote nothing about this date, so nothing is known about how it went.');
+        } else if (d.status === 'Proposed') {
+          lines.push('      This never became a fixed arrangement. Read that as a signal, not as a date.');
         }
       }
     });
   }
   const met = (person.dates || []).filter(d => d.status === 'Completed').length;
   const cancelled = (person.dates || []).filter(d => d.status === 'Cancelled' || d.status === 'No show').length;
+  const neverHappened = (person.dates || []).filter(d => d.status === 'Proposed').length;
   const everArranged = (person.dates || []).length > 0;
+  if (neverHappened) {
+    lines.push(neverHappened + ' meeting(s) were floated in the chat but never happened — no agreed date, or it faded. ' + 'These do not count as dates, but they are strong evidence about her interest level: a woman with high interest ' + 'converts a suggestion into a fixed arrangement.');
+  }
   lines.push('Meeting status: ' + (met ? 'you have met in person ' + met + ' time(s)' : everArranged ? 'a date has been arranged but none completed yet' : 'you have never arranged a date with her — the interest level here is provisional, judged on messages only') + (cancelled ? '; ' + cancelled + ' cancelled or no-show' : '') + '.');
   const sig = conversationSignals(person);
   if (sig) {
@@ -7691,7 +7725,9 @@ function RelationshipTracker() {
       id: 'd-' + Date.now() + Math.random().toString(36).slice(2, 5),
       location: sug.venue || sug.activity || 'TBC',
       date: sug.date || '',
-      status: sug.status === 'cancelled' ? 'Cancelled' : sug.status === 'happened' || isPast ? 'Completed' : 'Upcoming',
+      status: sug.status === 'cancelled' ? 'Cancelled' : sug.status === 'happened' ? 'Completed'
+      // Only ever discussed, and the day has gone by: it never happened.
+      : sug.status === 'proposed' && (!sug.date || isPast) ? 'Proposed' : isPast ? 'Completed' : 'Upcoming',
       venues: sug.venue || '',
       chemistry: 0,
       connection: 0,
@@ -8728,7 +8764,7 @@ function DateFormModal({
     className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
   })), /*#__PURE__*/React.createElement(Field, {
     label: "Status",
-    hint: "Date number is worked out automatically — Cancelled and No show don't count."
+    hint: "Date number is worked out automatically. Proposed, Cancelled and No show don't count as dates — they stay on the timeline as evidence."
   }, /*#__PURE__*/React.createElement("select", {
     value: form.status,
     onChange: e => setForm(f => ({
@@ -9582,19 +9618,22 @@ function DateTimelineCard({
 }) {
   const avg = overallAvg(entry);
   const written = (entry.notes || '').trim();
+  // A meeting that never happened belongs on the timeline as evidence, but it
+  // should not look like one that did.
+  const happened = entry.status === 'Completed';
   return /*#__PURE__*/React.createElement("div", {
-    className: `rounded-lg border-2 p-3 ${isLatest ? 'border-stone-900 bg-stone-50' : 'border-stone-300'}`
+    className: `rounded-lg p-3 ${happened ? 'border-2 ' + (isLatest ? 'border-stone-900 bg-stone-50' : 'border-stone-300') : 'border border-dashed border-stone-300 bg-stone-50/50'}`
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between gap-2 mb-1"
   }, /*#__PURE__*/React.createElement("span", {
-    className: "text-xs font-semibold text-stone-900 flex items-center gap-1.5"
+    className: `text-xs font-semibold flex items-center gap-1.5 ${happened ? 'text-stone-900' : 'text-stone-500'}`
   }, /*#__PURE__*/React.createElement(MapPin, {
     className: "w-3.5 h-3.5"
-  }), formatDayLabel(entry.date), " · ", entry.status === 'Completed' ? 'met in person' : entry.status.toLowerCase()), /*#__PURE__*/React.createElement("button", {
+  }), formatDayLabel(entry.date), " · ", entry.status === 'Completed' ? 'met in person' : entry.status === 'Proposed' ? 'suggested, never happened' : entry.status === 'Upcoming' ? 'booked' : entry.status.toLowerCase()), /*#__PURE__*/React.createElement("button", {
     onClick: onEdit,
     className: "text-xs text-stone-500 hover:text-stone-900 shrink-0"
   }, "Edit")), /*#__PURE__*/React.createElement("p", {
-    className: "text-sm text-stone-800 font-medium"
+    className: `text-sm font-medium ${happened ? 'text-stone-800' : 'text-stone-500'}`
   }, entry.location || 'Venue not recorded'), avg !== null && /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-stone-500 mt-0.5"
   }, avg.toFixed(1), "/5 — chemistry ", entry.chemistry || '–', ", connection ", entry.connection || '–', ", compatibility ", entry.compatibility || '–'), entry.outcome && /*#__PURE__*/React.createElement("p", {
