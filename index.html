@@ -394,7 +394,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 18:17';
+const BUILD_STAMP = '2026-08-02 18:36';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -861,13 +861,11 @@ const PROFILE_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of 
 {
 "name": string or null,
 "age": string or null,
-"hometown": string or null — where she is originally FROM. Only from a field labelled "Hometown", "From", "Originally from", or a stated birthplace. Not where she lives now.
-"location": string or null — where she LIVES. From a field labelled "Lives in", "Based in", "Home", or the town shown under her name on the profile header.
-"currentLocation": string or null — where the app says she is RIGHT NOW. From a field labelled "My location", "Current location", "Recently active in", or a place shown together with a distance. This is often the same as where she lives, but not always — she may be travelling.
-"distanceAway": string or null — the distance from the user as printed, e.g. "67 km away", "12 miles away".
-"height": string or null,
-"pronouns": string or null,
-"starSign": string or null,
+"hometown": string or null — her ORIGIN. Where she is from, grew up, or was born. Only from a field labelled Hometown / From / Originally from / Grew up in, or a clear statement of origin. A nationality or a foreign city named as her background counts. Where she lives now is NOT her origin.
+"location": string or null — her RESIDENCE. The place she lives, day to day. From a field labelled Lives in / Based in / Home, or the town printed under her name in the profile header. This is the field to use for a single unlabelled place name.
+"currentLocation": string or null — WHERE SHE IS AT THIS MOMENT, according to the app. Only from a field labelled My location / Current location / Recently active in / Nearby, or a place printed together with a distance from you. Leave null unless the profile is genuinely telling you where she is right now.
+"distanceAway": string or null — the distance exactly as printed, e.g. "67 km away", "12 miles away".
+
 "jobTitle": string or null,
 "workplace": string or null,
 "education": string or null,
@@ -890,7 +888,14 @@ const PROFILE_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of 
 "socials": array of strings — any Instagram/Spotify/other handles or links shown.
 "photoRegions": array of objects {"panel": integer (1-based panel number the photo appears in), "x": number, "y": number, "width": number, "height": number, "description": short string} — one entry per DISTINCT photograph. x/y/width/height are FRACTIONS (0 to 1) of THAT PANEL's own width and height, for the photo's bounding box. Include only real photographs, never app icons, buttons or UI chrome. If the same photo is visible in two overlapping panels, list it once, in the panel where it appears most completely. Be precise with the bounds — they are used to crop the image.
 }
-THE THREE LOCATION FIELDS ARE DIFFERENT THINGS AND MUST NOT BE CONFLATED. A profile reading "Tina, 51 — Trinity College Dublin 1996" with "My location: Baltinglass, Wicklow, 67 km away" and "Lives in Wicklow" gives location = "Wicklow", currentLocation = "Baltinglass, Wicklow", distanceAway = "67 km away", hometown = null. Never copy one value into more than one of these fields, and never infer a hometown from where she lives. If only one place is shown anywhere and it is not labelled, put it in "location" and leave the other two null.
+THE THREE LOCATION FIELDS ARE DIFFERENT THINGS. Work through them like this:
+- Ask "where is she from?" → hometown. "Where does she live?" → location. "Where is she right now?" → currentLocation.
+- Each place name in the profile belongs to exactly ONE of the three. Never write the same value into two fields.
+- Fill a field ONLY where the profile gives you evidence for that specific question. Do not reason from one to another: living in Dublin does not make Dublin her origin, and being from Kyiv does not mean she is in Kyiv now. Being unsure is fine — leave it null.
+- One unlabelled place and nothing else → location, with hometown and currentLocation null.
+- A place shown with a distance → currentLocation, and the distance into distanceAway. If that is the only place shown, location still stays null unless something says she lives there.
+- Worked example. Profile shows "Tina, 51", "Trinity College Dublin 1996", "Lives in Wicklow", and "My location: Baltinglass, Wicklow — 67 km away". Correct answer: hometown null (nothing states where she is from — Trinity is education, not origin), location "Wicklow", currentLocation "Baltinglass, Wicklow", distanceAway "67 km away".
+- Second example. Profile shows only "Gráinne, 44" and "Galway" under her name. Correct answer: location "Galway", hometown null, currentLocation null, distanceAway null.
 
 Use null for any single-value field you cannot determine, and an empty array for any list. Do not invent anything. Respond with the JSON object only.`;
 
@@ -911,6 +916,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 "attributionConfidence": "high" or "low",
 "appName": string or null,
 "matchedDate": string or null (YYYY-MM-DD — only from an explicit "you matched/connected on" banner. Not a message date, not a date arranged to meet.),
+"threadStart": true or false — true if these images show the VERY BEGINNING of the conversation (the first message ever sent between you is visible, with nothing scrolled off above it: an opening line, a match banner, or empty space above the first bubble). False if the screenshot starts mid-conversation.
 "relativeDayMarkers": array of strings — relative day dividers shown, exactly as printed ("Today", "Yesterday", "Monday"). Empty if all dividers are absolute dates.
 "sessions": array, oldest first, of objects:
   {
@@ -1165,7 +1171,7 @@ function nameSimilarity(a, b) {
 // at commit time, once the person it belongs to is known.
 async function extractChatPayload(files, onProgress) {
   let sessions = [], summaryParts = [], phoneNumbers = [], markers = [], dateEvents = [];
-  let contactName = null, matchedDate = null, appName = null, lowConfidence = false;
+  let contactName = null, matchedDate = null, appName = null, lowConfidence = false, threadStart = false;
   let n = 0;
   for (const file of files) {
     n += 1;
@@ -1183,7 +1189,7 @@ async function extractChatPayload(files, onProgress) {
   }
   const totalPoints = sessions.reduce((sum, ses) => sum + ((ses && ses.points) || []).length, 0);
   return {
-    sessions, summary: summaryParts.join(' '), phoneNumbers, contactName, matchedDate, appName, dateEvents,
+    sessions, summary: summaryParts.join(' '), phoneNumbers, contactName, matchedDate, appName, dateEvents, threadStart,
     markers: Array.from(new Set(markers.filter(Boolean))),
     lowConfidence,
     totalPoints,
@@ -1512,29 +1518,31 @@ const stageBadgeClass = {
 
 // ---------- Status read (coach summary at the top of a profile) ----------
 
-const COACH_PROMPT = `You are advising a confident, established man in his fifties on where one particular connection stands. Your advice blends the practical schools of Dan Bacon, Gary Gunn, Bobby Rio and Orion Taragan. Hold to that frame:
-- He leads. He proposes, decides and moves things forward rather than waiting to be chosen.
-- Investment is proportional. Enthusiasm is matched, not exceeded. Chasing, over-texting and seeking reassurance read as low value and kill attraction.
-- Text exists to arrange meeting in person, not to sustain a pen-pal correspondence. Several days of chat with no date is itself the problem.
-- Abundance, not scarcity. One woman going quiet is information, not a crisis.
-- Warm and direct together. Not aloof, not needy — interested, and unembarrassed about it.
+const COACH_PROMPT = `You are this man's dating coach. He is in his fifties, established, no time to waste. Write TO HIM, in the second person — "you", "she", "your". Never refer to him as "the user" or "he", and never write about him in the third person.
 
-READ THE VIBE PROPERLY. Do not just describe what was said — judge what it means. Weigh:
-- Reciprocity: does she ask him questions back, or only answer his? Are her lines as substantial as his, or noticeably shorter?
-- Initiation: who starts conversations, who revives them after a lull, who last spoke. Him always going first is the clearest warning sign there is.
-- Investment trend: is her engagement rising, flat, or cooling compared with earlier in the exchange?
-- Concreteness: does she offer specifics — her plans, opinions, availability, things about her life — or keep it generic and safe?
-- Meeting behaviour: has a meet-up been proposed, by whom, and did she engage with logistics or deflect? Vague enthusiasm without a date in the diary counts as a deflection.
-- Warmth signals: teasing, humour returned, personal disclosure, forward references to seeing him. Politeness on its own is not interest.
-Where signals conflict, say so rather than picking the flattering reading.
+YOUR COACHING IS A BLEND OF FIVE SCHOOLS. Use whichever fits the evidence:
+- Doc Love (The System, The Dating Dictionary). The central idea is INTEREST LEVEL: her interest in you, from 0 to 100, is the only number that matters, and it is set by her, not talked into existence by you. Above 90 she makes it easy — she replies, she is available, she asks about you, she does not go quiet. Below 51 nothing you say will fix it and effort makes it worse. His rules: be a Challenge, not a Wimp; she who cares less controls the relationship; never argue, complain or explain; do not buy her attention with gifts, compliments or long messages; let her invest; if she flakes twice, her interest level is your answer; and when it is over, FIDO — forget it, drive on.
+- Dan Bacon: attraction is created by how you carry yourself, not by seeking approval. Move things forward with confidence rather than asking permission.
+- Gary Gunn: warmth and natural conversation over technique. Be a real person she wants to spend an evening with.
+- Bobby Rio: intrigue and playful tension. Don't hand over everything you think; leave her curious.
+- Orion Taragan: relaxed masculine frame — you are not auditioning, you are deciding whether she suits you.
+
+READ THE EVIDENCE PROPERLY. This is where a lazy read goes wrong:
+- The timeline you are given is the complete record. Do NOT invent events. If no date is listed as Completed, you have not met her. If a date is Cancelled, it did not happen. Never describe something as having gone well unless there is a written account saying so.
+- Your account of a date is HIS OWN WRITING and is the only record of what happened face to face. It outranks everything in the messages. Where his notes and the chat disagree, follow his notes and say so out loud.
+- A message log shows what got typed, not what was felt. Politeness is not interest. Fast, warm and substantial replies are. Long gaps, one-word answers and no questions back are the opposite.
+- Weigh: who starts conversations, who revives them after silence, who last spoke, whether her replies match his in length and substance, whether she offers specifics about her life, whether she engages with logistics or deflects, whether she has ever proposed anything herself.
+- Vague enthusiasm with no date in the diary is a deflection, not a green light.
+- Where signals conflict, say so. Do not pick the flattering reading.
 
 Respond with ONLY a JSON object, no other text, no markdown fences:
 {
-"vibe": string — three to five words naming the temperature of it, e.g. "Warm and genuinely mutual", "Polite but one-sided", "Cooling since the first date", "Too early to call".
-"status": string — 3-4 sentences on where this actually stands, citing the specific evidence behind your vibe call: who is investing more, whether it has moved offline, how long it has been running, what has been agreed or dodged. Say plainly if it is going nowhere.
-"recommendation": string — 2-3 sentences on the single next move, and why it works. Specific enough to act on today. If the move is a message, say what it needs to do; if the move is to stop investing, say that.
+"interestLevel": integer 0-100 — your estimate of HER interest level in Doc Love's sense, judged from behaviour, not words. Be honest and specific rather than generous. If there is too little evidence, use 50 and say so in the status.
+"vibe": string — three to five words naming the temperature, e.g. "High interest, moving fast", "Polite, low interest", "Cooling since the second date", "Too early to call".
+"status": string — 3-5 sentences addressed to him, on what is actually happening between you and her. Cite the concrete evidence: what he wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
+"recommendation": string — 2-4 sentences on the single next move, why it works, and what to avoid. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him to stop investing.
 }
-Judge only on the facts given — never invent a message, a date or a detail. If there is genuinely little to go on, say so rather than padding. No flattery, no hedging. Respond with the JSON object only.`;
+Judge only on the facts given. Never invent a message, a date, a place or a feeling. No flattery, no hedging, no therapy-speak. Respond with the JSON object only.`;
 
 // Signals worth measuring rather than leaving the model to eyeball.
 function conversationSignals(person) {
@@ -1638,6 +1646,7 @@ async function generateCoachSummary(person) {
     }
   }
   return {
+    interestLevel: Number.isFinite(Number(result.interestLevel)) ? Math.max(0, Math.min(100, Math.round(Number(result.interestLevel)))) : null,
     vibe: String(result.vibe || '').trim(),
     status: String(result.status || '').trim(),
     recommendation: String(result.recommendation || '').trim(),
@@ -1681,9 +1690,32 @@ function StatusPanel({ read, busy, error, onRefresh, onOpenSettings }) {
       )}
       {read && (
         <div className="space-y-2">
-          {read.vibe && (
-            <div className="inline-block text-[11px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2.5 py-1">
-              {read.vibe}
+          <div className="flex items-center gap-2 flex-wrap">
+            {read.vibe && (
+              <span className="text-[11px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2.5 py-1">
+                {read.vibe}
+              </span>
+            )}
+          </div>
+          {typeof read.interestLevel === 'number' && (
+            <div>
+              <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-stone-400 mb-1">
+                <span>Her interest level</span>
+                <span className="text-stone-700 font-semibold text-sm">{read.interestLevel}%</span>
+              </div>
+              <div className="h-2 bg-stone-100 rounded-full overflow-hidden">
+                <div className={`h-full ${
+                  read.interestLevel >= 90 ? 'bg-emerald-600'
+                    : read.interestLevel >= 70 ? 'bg-emerald-500'
+                    : read.interestLevel >= 51 ? 'bg-amber-500' : 'bg-red-600'
+                }`} style={{ width: read.interestLevel + '%' }} />
+              </div>
+              <p className="text-[10px] text-stone-400 mt-0.5">
+                {read.interestLevel >= 90 ? 'High — she makes it easy'
+                  : read.interestLevel >= 70 ? 'Decent, not certain'
+                  : read.interestLevel >= 51 ? 'Lukewarm — needs to move offline'
+                  : 'Low — effort here makes it worse'}
+              </p>
             </div>
           )}
           <p className="text-sm text-stone-800">{read.status}</p>
@@ -2107,7 +2139,11 @@ function RelationshipTracker() {
 
     const timeline = flattenDays(days);
     const newPhone = (!target.phone && payload.phoneNumbers.length > 0) ? payload.phoneNumbers[0] : target.phone;
-    const newMet = (!target.dateMet && payload.matchedDate) ? payload.matchedDate : target.dateMet;
+    // On a dating app you cannot message before matching, so the first message in
+    // the thread dates the match — but only if this screenshot shows the very top.
+    const firstLogged = days.length ? days[0].date : null;
+    const inferredMatch = (payload.threadStart && firstLogged) ? firstLogged : null;
+    const newMet = target.dateMet || payload.matchedDate || inferredMatch || '';
     const newChannel = (!target.meetingChannel && payload.appName) ? payload.appName : target.meetingChannel;
     const lastDate = days.length ? days[days.length - 1].date : TODAY();
     const suggestions = [
@@ -2127,10 +2163,12 @@ function RelationshipTracker() {
         }
       : p));
     setError('');
+    const matchNote = (!target.dateMet && !payload.matchedDate && inferredMatch)
+      ? ' Match date set to ' + inferredMatch + ' from the first message — edit if wrong.' : '';
     setNotice(addedPoints + ' line' + (addedPoints === 1 ? '' : 's') + ' and ' + addedFacts + ' fact'
       + (addedFacts === 1 ? '' : 's') + ' added to ' + target.name
       + (dropped ? ', ' + dropped + ' duplicate' + (dropped === 1 ? '' : 's') + ' skipped' : '') + '.'
-      + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : ''));
+      + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : '') + matchNote);
     return { added: addedPoints, dropped };
   }
 
@@ -2723,6 +2761,15 @@ function RelationshipTracker() {
                       {p.coachRead.vibe && (
                         <span className="text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5">
                           {p.coachRead.vibe}
+                        </span>
+                      )}
+                      {typeof p.coachRead.interestLevel === 'number' && (
+                        <span className={`text-[10px] font-semibold rounded-full px-2 py-0.5 ${
+                          p.coachRead.interestLevel >= 70 ? 'bg-emerald-50 text-emerald-800'
+                            : p.coachRead.interestLevel >= 51 ? 'bg-amber-50 text-amber-800'
+                            : 'bg-red-50 text-red-700'
+                        }`}>
+                          Interest {p.coachRead.interestLevel}%
                         </span>
                       )}
                       {readIsStale(p) && (
@@ -4778,7 +4825,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 18:17';
+const BUILD_STAMP = '2026-08-02 18:36';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -5322,13 +5369,11 @@ const PROFILE_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of 
 {
 "name": string or null,
 "age": string or null,
-"hometown": string or null — where she is originally FROM. Only from a field labelled "Hometown", "From", "Originally from", or a stated birthplace. Not where she lives now.
-"location": string or null — where she LIVES. From a field labelled "Lives in", "Based in", "Home", or the town shown under her name on the profile header.
-"currentLocation": string or null — where the app says she is RIGHT NOW. From a field labelled "My location", "Current location", "Recently active in", or a place shown together with a distance. This is often the same as where she lives, but not always — she may be travelling.
-"distanceAway": string or null — the distance from the user as printed, e.g. "67 km away", "12 miles away".
-"height": string or null,
-"pronouns": string or null,
-"starSign": string or null,
+"hometown": string or null — her ORIGIN. Where she is from, grew up, or was born. Only from a field labelled Hometown / From / Originally from / Grew up in, or a clear statement of origin. A nationality or a foreign city named as her background counts. Where she lives now is NOT her origin.
+"location": string or null — her RESIDENCE. The place she lives, day to day. From a field labelled Lives in / Based in / Home, or the town printed under her name in the profile header. This is the field to use for a single unlabelled place name.
+"currentLocation": string or null — WHERE SHE IS AT THIS MOMENT, according to the app. Only from a field labelled My location / Current location / Recently active in / Nearby, or a place printed together with a distance from you. Leave null unless the profile is genuinely telling you where she is right now.
+"distanceAway": string or null — the distance exactly as printed, e.g. "67 km away", "12 miles away".
+
 "jobTitle": string or null,
 "workplace": string or null,
 "education": string or null,
@@ -5351,7 +5396,14 @@ const PROFILE_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of 
 "socials": array of strings — any Instagram/Spotify/other handles or links shown.
 "photoRegions": array of objects {"panel": integer (1-based panel number the photo appears in), "x": number, "y": number, "width": number, "height": number, "description": short string} — one entry per DISTINCT photograph. x/y/width/height are FRACTIONS (0 to 1) of THAT PANEL's own width and height, for the photo's bounding box. Include only real photographs, never app icons, buttons or UI chrome. If the same photo is visible in two overlapping panels, list it once, in the panel where it appears most completely. Be precise with the bounds — they are used to crop the image.
 }
-THE THREE LOCATION FIELDS ARE DIFFERENT THINGS AND MUST NOT BE CONFLATED. A profile reading "Tina, 51 — Trinity College Dublin 1996" with "My location: Baltinglass, Wicklow, 67 km away" and "Lives in Wicklow" gives location = "Wicklow", currentLocation = "Baltinglass, Wicklow", distanceAway = "67 km away", hometown = null. Never copy one value into more than one of these fields, and never infer a hometown from where she lives. If only one place is shown anywhere and it is not labelled, put it in "location" and leave the other two null.
+THE THREE LOCATION FIELDS ARE DIFFERENT THINGS. Work through them like this:
+- Ask "where is she from?" → hometown. "Where does she live?" → location. "Where is she right now?" → currentLocation.
+- Each place name in the profile belongs to exactly ONE of the three. Never write the same value into two fields.
+- Fill a field ONLY where the profile gives you evidence for that specific question. Do not reason from one to another: living in Dublin does not make Dublin her origin, and being from Kyiv does not mean she is in Kyiv now. Being unsure is fine — leave it null.
+- One unlabelled place and nothing else → location, with hometown and currentLocation null.
+- A place shown with a distance → currentLocation, and the distance into distanceAway. If that is the only place shown, location still stays null unless something says she lives there.
+- Worked example. Profile shows "Tina, 51", "Trinity College Dublin 1996", "Lives in Wicklow", and "My location: Baltinglass, Wicklow — 67 km away". Correct answer: hometown null (nothing states where she is from — Trinity is education, not origin), location "Wicklow", currentLocation "Baltinglass, Wicklow", distanceAway "67 km away".
+- Second example. Profile shows only "Gráinne, 44" and "Galway" under her name. Correct answer: location "Galway", hometown null, currentLocation null, distanceAway null.
 
 Use null for any single-value field you cannot determine, and an empty array for any list. Do not invent anything. Respond with the JSON object only.`;
 const CONVERSATION_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of ONE tall screenshot of a chat conversation, given top to bottom (oldest first). It could be any messaging app — WhatsApp, iMessage, Bumble, Hinge, Instagram. The user is a man; the other person is a woman.
@@ -5371,6 +5423,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 "attributionConfidence": "high" or "low",
 "appName": string or null,
 "matchedDate": string or null (YYYY-MM-DD — only from an explicit "you matched/connected on" banner. Not a message date, not a date arranged to meet.),
+"threadStart": true or false — true if these images show the VERY BEGINNING of the conversation (the first message ever sent between you is visible, with nothing scrolled off above it: an opening line, a match banner, or empty space above the first bubble). False if the screenshot starts mid-conversation.
 "relativeDayMarkers": array of strings — relative day dividers shown, exactly as printed ("Today", "Yesterday", "Monday"). Empty if all dividers are absolute dates.
 "sessions": array, oldest first, of objects:
   {
@@ -5653,7 +5706,8 @@ async function extractChatPayload(files, onProgress) {
   let contactName = null,
     matchedDate = null,
     appName = null,
-    lowConfidence = false;
+    lowConfidence = false,
+    threadStart = false;
   let n = 0;
   for (const file of files) {
     n += 1;
@@ -5678,6 +5732,7 @@ async function extractChatPayload(files, onProgress) {
     matchedDate,
     appName,
     dateEvents,
+    threadStart,
     markers: Array.from(new Set(markers.filter(Boolean))),
     lowConfidence,
     totalPoints,
@@ -6076,29 +6131,31 @@ const stageBadgeClass = {
 
 // ---------- Status read (coach summary at the top of a profile) ----------
 
-const COACH_PROMPT = `You are advising a confident, established man in his fifties on where one particular connection stands. Your advice blends the practical schools of Dan Bacon, Gary Gunn, Bobby Rio and Orion Taragan. Hold to that frame:
-- He leads. He proposes, decides and moves things forward rather than waiting to be chosen.
-- Investment is proportional. Enthusiasm is matched, not exceeded. Chasing, over-texting and seeking reassurance read as low value and kill attraction.
-- Text exists to arrange meeting in person, not to sustain a pen-pal correspondence. Several days of chat with no date is itself the problem.
-- Abundance, not scarcity. One woman going quiet is information, not a crisis.
-- Warm and direct together. Not aloof, not needy — interested, and unembarrassed about it.
+const COACH_PROMPT = `You are this man's dating coach. He is in his fifties, established, no time to waste. Write TO HIM, in the second person — "you", "she", "your". Never refer to him as "the user" or "he", and never write about him in the third person.
 
-READ THE VIBE PROPERLY. Do not just describe what was said — judge what it means. Weigh:
-- Reciprocity: does she ask him questions back, or only answer his? Are her lines as substantial as his, or noticeably shorter?
-- Initiation: who starts conversations, who revives them after a lull, who last spoke. Him always going first is the clearest warning sign there is.
-- Investment trend: is her engagement rising, flat, or cooling compared with earlier in the exchange?
-- Concreteness: does she offer specifics — her plans, opinions, availability, things about her life — or keep it generic and safe?
-- Meeting behaviour: has a meet-up been proposed, by whom, and did she engage with logistics or deflect? Vague enthusiasm without a date in the diary counts as a deflection.
-- Warmth signals: teasing, humour returned, personal disclosure, forward references to seeing him. Politeness on its own is not interest.
-Where signals conflict, say so rather than picking the flattering reading.
+YOUR COACHING IS A BLEND OF FIVE SCHOOLS. Use whichever fits the evidence:
+- Doc Love (The System, The Dating Dictionary). The central idea is INTEREST LEVEL: her interest in you, from 0 to 100, is the only number that matters, and it is set by her, not talked into existence by you. Above 90 she makes it easy — she replies, she is available, she asks about you, she does not go quiet. Below 51 nothing you say will fix it and effort makes it worse. His rules: be a Challenge, not a Wimp; she who cares less controls the relationship; never argue, complain or explain; do not buy her attention with gifts, compliments or long messages; let her invest; if she flakes twice, her interest level is your answer; and when it is over, FIDO — forget it, drive on.
+- Dan Bacon: attraction is created by how you carry yourself, not by seeking approval. Move things forward with confidence rather than asking permission.
+- Gary Gunn: warmth and natural conversation over technique. Be a real person she wants to spend an evening with.
+- Bobby Rio: intrigue and playful tension. Don't hand over everything you think; leave her curious.
+- Orion Taragan: relaxed masculine frame — you are not auditioning, you are deciding whether she suits you.
+
+READ THE EVIDENCE PROPERLY. This is where a lazy read goes wrong:
+- The timeline you are given is the complete record. Do NOT invent events. If no date is listed as Completed, you have not met her. If a date is Cancelled, it did not happen. Never describe something as having gone well unless there is a written account saying so.
+- Your account of a date is HIS OWN WRITING and is the only record of what happened face to face. It outranks everything in the messages. Where his notes and the chat disagree, follow his notes and say so out loud.
+- A message log shows what got typed, not what was felt. Politeness is not interest. Fast, warm and substantial replies are. Long gaps, one-word answers and no questions back are the opposite.
+- Weigh: who starts conversations, who revives them after silence, who last spoke, whether her replies match his in length and substance, whether she offers specifics about her life, whether she engages with logistics or deflects, whether she has ever proposed anything herself.
+- Vague enthusiasm with no date in the diary is a deflection, not a green light.
+- Where signals conflict, say so. Do not pick the flattering reading.
 
 Respond with ONLY a JSON object, no other text, no markdown fences:
 {
-"vibe": string — three to five words naming the temperature of it, e.g. "Warm and genuinely mutual", "Polite but one-sided", "Cooling since the first date", "Too early to call".
-"status": string — 3-4 sentences on where this actually stands, citing the specific evidence behind your vibe call: who is investing more, whether it has moved offline, how long it has been running, what has been agreed or dodged. Say plainly if it is going nowhere.
-"recommendation": string — 2-3 sentences on the single next move, and why it works. Specific enough to act on today. If the move is a message, say what it needs to do; if the move is to stop investing, say that.
+"interestLevel": integer 0-100 — your estimate of HER interest level in Doc Love's sense, judged from behaviour, not words. Be honest and specific rather than generous. If there is too little evidence, use 50 and say so in the status.
+"vibe": string — three to five words naming the temperature, e.g. "High interest, moving fast", "Polite, low interest", "Cooling since the second date", "Too early to call".
+"status": string — 3-5 sentences addressed to him, on what is actually happening between you and her. Cite the concrete evidence: what he wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
+"recommendation": string — 2-4 sentences on the single next move, why it works, and what to avoid. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him to stop investing.
 }
-Judge only on the facts given — never invent a message, a date or a detail. If there is genuinely little to go on, say so rather than padding. No flattery, no hedging. Respond with the JSON object only.`;
+Judge only on the facts given. Never invent a message, a date, a place or a feeling. No flattery, no hedging, no therapy-speak. Respond with the JSON object only.`;
 
 // Signals worth measuring rather than leaving the model to eyeball.
 function conversationSignals(person) {
@@ -6201,6 +6258,7 @@ async function generateCoachSummary(person) {
     }
   }
   return {
+    interestLevel: Number.isFinite(Number(result.interestLevel)) ? Math.max(0, Math.min(100, Math.round(Number(result.interestLevel)))) : null,
     vibe: String(result.vibe || '').trim(),
     status: String(result.status || '').trim(),
     recommendation: String(result.recommendation || '').trim(),
@@ -6239,9 +6297,24 @@ function StatusPanel({
     className: "text-sm text-stone-500"
   }, "No read yet — pull one once there's a profile, a chat or a date logged."), read && /*#__PURE__*/React.createElement("div", {
     className: "space-y-2"
-  }, read.vibe && /*#__PURE__*/React.createElement("div", {
-    className: "inline-block text-[11px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2.5 py-1"
-  }, read.vibe), /*#__PURE__*/React.createElement("p", {
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-2 flex-wrap"
+  }, read.vibe && /*#__PURE__*/React.createElement("span", {
+    className: "text-[11px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2.5 py-1"
+  }, read.vibe)), typeof read.interestLevel === 'number' && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between text-[10px] uppercase tracking-wide text-stone-400 mb-1"
+  }, /*#__PURE__*/React.createElement("span", null, "Her interest level"), /*#__PURE__*/React.createElement("span", {
+    className: "text-stone-700 font-semibold text-sm"
+  }, read.interestLevel, "%")), /*#__PURE__*/React.createElement("div", {
+    className: "h-2 bg-stone-100 rounded-full overflow-hidden"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: `h-full ${read.interestLevel >= 90 ? 'bg-emerald-600' : read.interestLevel >= 70 ? 'bg-emerald-500' : read.interestLevel >= 51 ? 'bg-amber-500' : 'bg-red-600'}`,
+    style: {
+      width: read.interestLevel + '%'
+    }
+  })), /*#__PURE__*/React.createElement("p", {
+    className: "text-[10px] text-stone-400 mt-0.5"
+  }, read.interestLevel >= 90 ? 'High — she makes it easy' : read.interestLevel >= 70 ? 'Decent, not certain' : read.interestLevel >= 51 ? 'Lukewarm — needs to move offline' : 'Low — effort here makes it worse')), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-800"
   }, read.status), /*#__PURE__*/React.createElement("div", {
     className: "border-l-2 border-stone-900 pl-2.5"
@@ -6781,7 +6854,11 @@ function RelationshipTracker() {
     }
     const timeline = flattenDays(days);
     const newPhone = !target.phone && payload.phoneNumbers.length > 0 ? payload.phoneNumbers[0] : target.phone;
-    const newMet = !target.dateMet && payload.matchedDate ? payload.matchedDate : target.dateMet;
+    // On a dating app you cannot message before matching, so the first message in
+    // the thread dates the match — but only if this screenshot shows the very top.
+    const firstLogged = days.length ? days[0].date : null;
+    const inferredMatch = payload.threadStart && firstLogged ? firstLogged : null;
+    const newMet = target.dateMet || payload.matchedDate || inferredMatch || '';
     const newChannel = !target.meetingChannel && payload.appName ? payload.appName : target.meetingChannel;
     const lastDate = days.length ? days[days.length - 1].date : TODAY();
     const suggestions = [...(target.dateSuggestions || []), ...buildDateSuggestions(payload.dateEvents, target, confirmedDate || lastDate)].filter((sug, i, arr) => arr.findIndex(x => x.key === sug.key) === i);
@@ -6797,7 +6874,8 @@ function RelationshipTracker() {
       dateSuggestions: suggestions
     } : p));
     setError('');
-    setNotice(addedPoints + ' line' + (addedPoints === 1 ? '' : 's') + ' and ' + addedFacts + ' fact' + (addedFacts === 1 ? '' : 's') + ' added to ' + target.name + (dropped ? ', ' + dropped + ' duplicate' + (dropped === 1 ? '' : 's') + ' skipped' : '') + '.' + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : ''));
+    const matchNote = !target.dateMet && !payload.matchedDate && inferredMatch ? ' Match date set to ' + inferredMatch + ' from the first message — edit if wrong.' : '';
+    setNotice(addedPoints + ' line' + (addedPoints === 1 ? '' : 's') + ' and ' + addedFacts + ' fact' + (addedFacts === 1 ? '' : 's') + ' added to ' + target.name + (dropped ? ', ' + dropped + ' duplicate' + (dropped === 1 ? '' : 's') + ' skipped' : '') + '.' + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : '') + matchNote);
     return {
       added: addedPoints,
       dropped
@@ -7403,7 +7481,9 @@ function RelationshipTracker() {
       className: "flex items-center gap-2 flex-wrap"
     }, p.coachRead.vibe && /*#__PURE__*/React.createElement("span", {
       className: "text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5"
-    }, p.coachRead.vibe), readIsStale(p) && /*#__PURE__*/React.createElement("span", {
+    }, p.coachRead.vibe), typeof p.coachRead.interestLevel === 'number' && /*#__PURE__*/React.createElement("span", {
+      className: `text-[10px] font-semibold rounded-full px-2 py-0.5 ${p.coachRead.interestLevel >= 70 ? 'bg-emerald-50 text-emerald-800' : p.coachRead.interestLevel >= 51 ? 'bg-amber-50 text-amber-800' : 'bg-red-50 text-red-700'}`
+    }, "Interest ", p.coachRead.interestLevel, "%"), readIsStale(p) && /*#__PURE__*/React.createElement("span", {
       className: "text-[10px] uppercase tracking-wide text-amber-700"
     }, "Read out of date")), briefNextStep(p.coachRead) && /*#__PURE__*/React.createElement("p", {
       className: "mt-1.5 text-sm text-stone-700"
