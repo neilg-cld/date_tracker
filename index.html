@@ -395,7 +395,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 20:31';
+const BUILD_STAMP = '2026-08-02 20:37';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -609,6 +609,7 @@ function daysBetween(isoA, isoB) {
 function lastActivity(person) {
   const candidates = [person.lastContact, person.dateMet]
     .concat((person.conversationDays || []).map(d => d.date))
+    .concat((person.contactLog || []).map(c => c.date))
     .concat((person.conversationLog || []).map(c => c.date))
     .concat((person.dates || []).filter(d => d.status !== 'Upcoming').map(d => d.date))
     .filter(Boolean);
@@ -712,7 +713,7 @@ function migrateFromFlatList(flat) {
 function backfillPerson(p) {
   const out = {
     photos: [], profilePhotoId: null, conversationLog: [], phone: '', lastContact: '',
-    dateSuggestions: [], dismissedDateKeys: [], conversationDays: [],
+    dateSuggestions: [], dismissedDateKeys: [], conversationDays: [], contactLog: [],
     ...p,
     profile: { ...emptyProfile(), ...(p.profile || {}) },
   };
@@ -788,6 +789,10 @@ function buildChronology(person) {
     if (d.status === 'Upcoming' && d.date >= TODAY()) return;   // shown separately as what's coming
     items.push({ kind: 'date', date: d.date, entry: d });
   });
+  (person.contactLog || []).forEach(c => {
+    if (!c || !c.date) return;
+    items.push({ kind: 'contact', date: c.date, entry: c });
+  });
   return items.sort((a, b) => {
     if (a.date !== b.date) return (a.date || '').localeCompare(b.date || '');
     // A date and a chat on the same day: the date is the bigger event, put it last.
@@ -818,6 +823,8 @@ function daysFromFlatLog(log) {
 }
 
 // ---------- Relationship shape: span, classification, closure ----------
+
+const CONTACT_TYPES = ['Phone call', 'Video call', 'Voice note', 'Saw her in person', 'Other'];
 
 const REL_TYPES = [
   'Talking only', 'One date', 'Few dates', 'Short-lived', 'Situationship',
@@ -1836,6 +1843,9 @@ function buildCoachContext(person) {
       if (item.kind === 'chat') {
         lines.push('  ' + (item.date || 'undated') + ' MESSAGES — ' + (item.day.summary || 'no summary'));
         (item.day.facts || []).forEach(f => lines.push('      fact: ' + f));
+      } else if (item.kind === 'contact') {
+        lines.push('  ' + item.date + ' ' + (item.entry.type || 'Contact').toUpperCase()
+          + ' — YOUR OWN ACCOUNT (nothing else records this): ' + item.entry.text);
       } else {
         const d = item.entry;
         const avg = overallAvg(d);
@@ -2114,6 +2124,7 @@ function RelationshipTracker() {
   const [syncState, setSyncState] = useState({ status: Sync.configured() ? 'idle' : 'off', last: Sync.lastPull(), error: '' });
   const [syncConflict, setSyncConflict] = useState(null);
   const pushTimer = React.useRef(null);
+  const [contactNote, setContactNote] = useState(null);
   const [coachBusy, setCoachBusy] = useState(false);
   const [coachError, setCoachError] = useState('');
 
@@ -2332,6 +2343,23 @@ function RelationshipTracker() {
           endReason: p.endReason || 'Faded out' }
       : p));
     setNotice('Marked as ended in ' + endYm + '. Edit the details if that is not right.');
+  }
+
+  async function saveContactNote(entry) {
+    if (!selected) return;
+    const log = [...(selected.contactLog || [])];
+    if (entry.id) {
+      const i = log.findIndex(c => c.id === entry.id);
+      if (i > -1) log[i] = { ...log[i], ...entry };
+    } else {
+      log.push({ ...entry, id: 'ct-' + Date.now() + Math.random().toString(36).slice(2, 5) });
+    }
+    log.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    await persist(peopleRef.current.map(p => p.id === selected.id
+      ? { ...p, contactLog: log, lastContact: log.map(c => c.date).filter(Boolean).sort().slice(-1)[0] || p.lastContact }
+      : p));
+    setContactNote(null);
+    setNotice('Recorded.');
   }
 
   async function logContactToday() {
@@ -2843,6 +2871,8 @@ function RelationshipTracker() {
             onDelete={deleteConversationEntry}
             onClear={clearConversation}
             onEditDate={startEditDate}
+            onAddContact={() => setContactNote({})}
+            onEditContact={(c) => setContactNote(c)}
             dateNotes={((selected.coachRead && selected.coachRead.dateNotes) || [])
               .reduce((acc, d) => { acc[d.date] = d.read; return acc; }, {})}
             needsSummary={daysNeedingSummary(selected).length}
@@ -2923,6 +2953,13 @@ function RelationshipTracker() {
           </div>
         </div>
 
+        {contactNote && (
+          <ContactNoteModal
+            initial={contactNote}
+            onCancel={() => setContactNote(null)}
+            onSave={saveContactNote}
+          />
+        )}
         {showProfileEdit && (
           <ProfileEditModal
             profile={selected.profile || emptyProfile()}
@@ -3978,7 +4015,7 @@ function groupPointsByDate(points) {
 
 
 
-function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClear, onEditDate, needsSummary, onSummarise, dateNotes }) {
+function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClear, onEditDate, onAddContact, onEditContact, needsSummary, onSummarise, dateNotes }) {
   const items = chronology || [];
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -4007,10 +4044,16 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClea
     <div className="bg-white border border-stone-200 rounded-lg p-4 mb-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-stone-700">Timeline</h3>
-        <button onClick={() => inputRef.current && inputRef.current.click()} disabled={busy}
-          className="flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100 disabled:opacity-60">
-          <Camera className="w-3.5 h-3.5" /> {busy ? 'Reading…' : 'Add chat'}
-        </button>
+        <div className="flex gap-1.5">
+          <button onClick={onAddContact}
+            className="flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100">
+            <Pencil className="w-3.5 h-3.5" /> Write it up
+          </button>
+          <button onClick={() => inputRef.current && inputRef.current.click()} disabled={busy}
+            className="flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100 disabled:opacity-60">
+            <Camera className="w-3.5 h-3.5" /> {busy ? 'Reading…' : 'Add chat'}
+          </button>
+        </div>
       </div>
       <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFiles} />
 
@@ -4066,7 +4109,9 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClea
                   </div>
                 )}
 
-                {item.kind === 'date' ? (
+                {item.kind === 'contact' ? (
+                  <ContactTimelineCard entry={item.entry} isLatest={isLatest} onEdit={() => onEditContact(item.entry)} />
+                ) : item.kind === 'date' ? (
                   <DateTimelineCard
                     entry={item.entry}
                     isLatest={isLatest}
@@ -4132,8 +4177,57 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClea
         </div>
       )}
 
-      <p className="text-xs text-stone-400 mt-3">Chat is summarised by day, small talk dropped. Dates sit in the same timeline — what you write after one is the only record of it.</p>
+      <p className="text-xs text-stone-400 mt-3">Chat is summarised by day, small talk dropped. Calls, dates and anything else you write up sit in the same timeline — your account is the only record of those.</p>
     </div>
+  );
+}
+
+function ContactTimelineCard({ entry, isLatest, onEdit }) {
+  return (
+    <div className={`rounded-lg border p-3 ${isLatest ? 'border-stone-900 bg-stone-50' : 'border-stone-200'}`}>
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <span className="text-xs font-semibold text-stone-700 flex items-center gap-1.5">
+          <MessageCircle className="w-3.5 h-3.5" />
+          {formatDayLabel(entry.date)} · {(entry.type || 'Contact').toLowerCase()}
+        </span>
+        <button onClick={onEdit} className="text-xs text-stone-500 hover:text-stone-900 shrink-0">Edit</button>
+      </div>
+      <div className="border-l-2 border-stone-900 pl-2.5">
+        <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-0.5">Your record</div>
+        <p className="text-sm text-stone-800 whitespace-pre-line">{entry.text}</p>
+      </div>
+    </div>
+  );
+}
+
+function ContactNoteModal({ initial, onCancel, onSave }) {
+  const [type, setType] = useState((initial && initial.type) || 'Phone call');
+  const [date, setDate] = useState((initial && initial.date) || TODAY());
+  const [text, setText] = useState((initial && initial.text) || '');
+  const inputCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
+  return (
+    <ModalShell
+      title={initial && initial.id ? 'Edit contact' : 'Record contact'}
+      onCancel={onCancel}
+      onSave={() => text.trim() && onSave({ id: (initial && initial.id) || null, type, date, text: text.trim() })}
+    >
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="What was it">
+          <select value={type} onChange={e => setType(e.target.value)} className={inputCls}>
+            {CONTACT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </Field>
+        <Field label="When">
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} className={inputCls} />
+        </Field>
+      </div>
+      <Field label="What happened — your record" hint="Nothing else captures this. What was said, how she was, anything arranged.">
+        <textarea value={text} onChange={e => setText(e.target.value)} rows={7}
+          onFocus={focusScroll} style={fieldScrollMargin}
+          placeholder="Rang her after work — 40 minutes, easy going. She brought up the trip to Donegal herself and asked when I was free."
+          className={inputCls} />
+      </Field>
+    </ModalShell>
   );
 }
 
@@ -5284,7 +5378,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 20:31';
+const BUILD_STAMP = '2026-08-02 20:37';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -5535,7 +5629,7 @@ function daysBetween(isoA, isoB) {
 // Most recent real-world activity: explicit contact log, a conversation entry,
 // a completed date, or falling back to the day you met.
 function lastActivity(person) {
-  const candidates = [person.lastContact, person.dateMet].concat((person.conversationDays || []).map(d => d.date)).concat((person.conversationLog || []).map(c => c.date)).concat((person.dates || []).filter(d => d.status !== 'Upcoming').map(d => d.date)).filter(Boolean);
+  const candidates = [person.lastContact, person.dateMet].concat((person.conversationDays || []).map(d => d.date)).concat((person.contactLog || []).map(c => c.date)).concat((person.conversationLog || []).map(c => c.date)).concat((person.dates || []).filter(d => d.status !== 'Upcoming').map(d => d.date)).filter(Boolean);
   if (!candidates.length) return null;
   return candidates.sort().slice(-1)[0];
 }
@@ -5673,6 +5767,7 @@ function backfillPerson(p) {
     dateSuggestions: [],
     dismissedDateKeys: [],
     conversationDays: [],
+    contactLog: [],
     ...p,
     profile: {
       ...emptyProfile(),
@@ -5774,6 +5869,14 @@ function buildChronology(person) {
       entry: d
     });
   });
+  (person.contactLog || []).forEach(c => {
+    if (!c || !c.date) return;
+    items.push({
+      kind: 'contact',
+      date: c.date,
+      entry: c
+    });
+  });
   return items.sort((a, b) => {
     if (a.date !== b.date) return (a.date || '').localeCompare(b.date || '');
     // A date and a chat on the same day: the date is the bigger event, put it last.
@@ -5811,6 +5914,7 @@ function daysFromFlatLog(log) {
 
 // ---------- Relationship shape: span, classification, closure ----------
 
+const CONTACT_TYPES = ['Phone call', 'Video call', 'Voice note', 'Saw her in person', 'Other'];
 const REL_TYPES = ['Talking only', 'One date', 'Few dates', 'Short-lived', 'Situationship', 'Relationship', 'Long-term relationship', 'Rekindled', 'Other'];
 function ym(iso) {
   return iso ? String(iso).slice(0, 7) : '';
@@ -6902,6 +7006,8 @@ function buildCoachContext(person) {
       if (item.kind === 'chat') {
         lines.push('  ' + (item.date || 'undated') + ' MESSAGES — ' + (item.day.summary || 'no summary'));
         (item.day.facts || []).forEach(f => lines.push('      fact: ' + f));
+      } else if (item.kind === 'contact') {
+        lines.push('  ' + item.date + ' ' + (item.entry.type || 'Contact').toUpperCase() + ' — YOUR OWN ACCOUNT (nothing else records this): ' + item.entry.text);
       } else {
         const d = item.entry;
         const avg = overallAvg(d);
@@ -7189,6 +7295,7 @@ function RelationshipTracker() {
   });
   const [syncConflict, setSyncConflict] = useState(null);
   const pushTimer = React.useRef(null);
+  const [contactNote, setContactNote] = useState(null);
   const [coachBusy, setCoachBusy] = useState(false);
   const [coachError, setCoachError] = useState('');
   const [showDateForm, setShowDateForm] = useState(false);
@@ -7474,6 +7581,30 @@ function RelationshipTracker() {
       endReason: p.endReason || 'Faded out'
     } : p));
     setNotice('Marked as ended in ' + endYm + '. Edit the details if that is not right.');
+  }
+  async function saveContactNote(entry) {
+    if (!selected) return;
+    const log = [...(selected.contactLog || [])];
+    if (entry.id) {
+      const i = log.findIndex(c => c.id === entry.id);
+      if (i > -1) log[i] = {
+        ...log[i],
+        ...entry
+      };
+    } else {
+      log.push({
+        ...entry,
+        id: 'ct-' + Date.now() + Math.random().toString(36).slice(2, 5)
+      });
+    }
+    log.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    await persist(peopleRef.current.map(p => p.id === selected.id ? {
+      ...p,
+      contactLog: log,
+      lastContact: log.map(c => c.date).filter(Boolean).sort().slice(-1)[0] || p.lastContact
+    } : p));
+    setContactNote(null);
+    setNotice('Recorded.');
   }
   async function logContactToday() {
     if (!selected) return;
@@ -8026,6 +8157,8 @@ function RelationshipTracker() {
       onDelete: deleteConversationEntry,
       onClear: clearConversation,
       onEditDate: startEditDate,
+      onAddContact: () => setContactNote({}),
+      onEditContact: c => setContactNote(c),
       dateNotes: (selected.coachRead && selected.coachRead.dateNotes || []).reduce((acc, d) => {
         acc[d.date] = d.read;
         return acc;
@@ -8101,7 +8234,11 @@ function RelationshipTracker() {
       }, /*#__PURE__*/React.createElement(Trash2, {
         className: "w-4 h-4"
       })))));
-    }))), showProfileEdit && /*#__PURE__*/React.createElement(ProfileEditModal, {
+    }))), contactNote && /*#__PURE__*/React.createElement(ContactNoteModal, {
+      initial: contactNote,
+      onCancel: () => setContactNote(null),
+      onSave: saveContactNote
+    }), showProfileEdit && /*#__PURE__*/React.createElement(ProfileEditModal, {
       profile: selected.profile || emptyProfile(),
       onCancel: () => setShowProfileEdit(false),
       onSave: saveProfileDetails
@@ -9471,6 +9608,8 @@ function ConversationSection({
   onDelete,
   onClear,
   onEditDate,
+  onAddContact,
+  onEditContact,
   needsSummary,
   onSummarise,
   dateNotes
@@ -9502,13 +9641,20 @@ function ConversationSection({
     className: "flex items-center justify-between mb-3"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "text-sm font-semibold text-stone-700"
-  }, "Timeline"), /*#__PURE__*/React.createElement("button", {
+  }, "Timeline"), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1.5"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onAddContact,
+    className: "flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100"
+  }, /*#__PURE__*/React.createElement(Pencil, {
+    className: "w-3.5 h-3.5"
+  }), " Write it up"), /*#__PURE__*/React.createElement("button", {
     onClick: () => inputRef.current && inputRef.current.click(),
     disabled: busy,
     className: "flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100 disabled:opacity-60"
   }, /*#__PURE__*/React.createElement(Camera, {
     className: "w-3.5 h-3.5"
-  }), " ", busy ? 'Reading…' : 'Add chat')), /*#__PURE__*/React.createElement("input", {
+  }), " ", busy ? 'Reading…' : 'Add chat'))), /*#__PURE__*/React.createElement("input", {
     ref: inputRef,
     type: "file",
     accept: "image/*",
@@ -9559,7 +9705,11 @@ function ConversationSection({
       className: "text-[10px] uppercase tracking-wide text-stone-400"
     }, gap, " days later"), /*#__PURE__*/React.createElement("div", {
       className: "flex-1 border-t border-dashed border-stone-200"
-    })), item.kind === 'date' ? /*#__PURE__*/React.createElement(DateTimelineCard, {
+    })), item.kind === 'contact' ? /*#__PURE__*/React.createElement(ContactTimelineCard, {
+      entry: item.entry,
+      isLatest: isLatest,
+      onEdit: () => onEditContact(item.entry)
+    }) : item.kind === 'date' ? /*#__PURE__*/React.createElement(DateTimelineCard, {
       entry: item.entry,
       isLatest: isLatest,
       onEdit: () => onEditDate(item.entry),
@@ -9608,7 +9758,80 @@ function ConversationSection({
     }))))))));
   })), /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-stone-400 mt-3"
-  }, "Chat is summarised by day, small talk dropped. Dates sit in the same timeline — what you write after one is the only record of it."));
+  }, "Chat is summarised by day, small talk dropped. Calls, dates and anything else you write up sit in the same timeline — your account is the only record of those."));
+}
+function ContactTimelineCard({
+  entry,
+  isLatest,
+  onEdit
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: `rounded-lg border p-3 ${isLatest ? 'border-stone-900 bg-stone-50' : 'border-stone-200'}`
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between gap-2 mb-1"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-xs font-semibold text-stone-700 flex items-center gap-1.5"
+  }, /*#__PURE__*/React.createElement(MessageCircle, {
+    className: "w-3.5 h-3.5"
+  }), formatDayLabel(entry.date), " · ", (entry.type || 'Contact').toLowerCase()), /*#__PURE__*/React.createElement("button", {
+    onClick: onEdit,
+    className: "text-xs text-stone-500 hover:text-stone-900 shrink-0"
+  }, "Edit")), /*#__PURE__*/React.createElement("div", {
+    className: "border-l-2 border-stone-900 pl-2.5"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-[10px] uppercase tracking-wide text-stone-400 mb-0.5"
+  }, "Your record"), /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-800 whitespace-pre-line"
+  }, entry.text)));
+}
+function ContactNoteModal({
+  initial,
+  onCancel,
+  onSave
+}) {
+  const [type, setType] = useState(initial && initial.type || 'Phone call');
+  const [date, setDate] = useState(initial && initial.date || TODAY());
+  const [text, setText] = useState(initial && initial.text || '');
+  const inputCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
+  return /*#__PURE__*/React.createElement(ModalShell, {
+    title: initial && initial.id ? 'Edit contact' : 'Record contact',
+    onCancel: onCancel,
+    onSave: () => text.trim() && onSave({
+      id: initial && initial.id || null,
+      type,
+      date,
+      text: text.trim()
+    })
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-2"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "What was it"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: type,
+    onChange: e => setType(e.target.value),
+    className: inputCls
+  }, CONTACT_TYPES.map(t => /*#__PURE__*/React.createElement("option", {
+    key: t,
+    value: t
+  }, t)))), /*#__PURE__*/React.createElement(Field, {
+    label: "When"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: date,
+    onChange: e => setDate(e.target.value),
+    className: inputCls
+  }))), /*#__PURE__*/React.createElement(Field, {
+    label: "What happened — your record",
+    hint: "Nothing else captures this. What was said, how she was, anything arranged."
+  }, /*#__PURE__*/React.createElement("textarea", {
+    value: text,
+    onChange: e => setText(e.target.value),
+    rows: 7,
+    onFocus: focusScroll,
+    style: fieldScrollMargin,
+    placeholder: "Rang her after work — 40 minutes, easy going. She brought up the trip to Donegal herself and asked when I was free.",
+    className: inputCls
+  })));
 }
 function DateTimelineCard({
   entry,
