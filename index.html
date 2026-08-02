@@ -385,6 +385,14 @@ const emptyDateForm = {
 
 // ---------- (No seed/example data — a brand-new install starts empty.) ----------
 
+// Some origins (Android content:// URLs, private modes) throw on any localStorage
+// access. Every read and write goes through here so a render can never die on it.
+const Local = {
+  get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } },
+  set(key, value) { try { localStorage.setItem(key, value); return true; } catch (e) { return false; } },
+  remove(key) { try { localStorage.removeItem(key); } catch (e) { /* ignore */ } },
+};
+
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
 // access token with the "gist" permission is all it needs — no server, and the
@@ -394,23 +402,19 @@ const GIST_FILE = 'relationship-tracker-data.json';
 const GIST_TAG = 'relationship-tracker: private data store (do not edit by hand)';
 
 const Sync = {
-  token() { try { return localStorage.getItem('rt:gh-token') || ''; } catch (e) { return ''; } },
-  gistId() { try { return localStorage.getItem('rt:gist-id') || ''; } catch (e) { return ''; } },
-  lastPull() { try { return localStorage.getItem('rt:last-pull') || ''; } catch (e) { return ''; } },
+  token() { return Local.get('rt:gh-token') || ''; },
+  gistId() { return Local.get('rt:gist-id') || ''; },
+  lastPull() { return Local.get('rt:last-pull') || ''; },
   configured() { return !!this.token(); },
   save(token, gistId) {
-    try {
-      localStorage.setItem('rt:gh-token', token);
-      if (gistId) localStorage.setItem('rt:gist-id', gistId);
-    } catch (e) { /* ignore */ }
+    Local.set('rt:gh-token', token);
+    if (gistId) Local.set('rt:gist-id', gistId);
   },
-  markPulled(stamp) { try { localStorage.setItem('rt:last-pull', stamp || ''); } catch (e) {} },
+  markPulled(stamp) { Local.set('rt:last-pull', stamp || ''); },
   clear() {
-    try {
-      localStorage.removeItem('rt:gh-token');
-      localStorage.removeItem('rt:gist-id');
-      localStorage.removeItem('rt:last-pull');
-    } catch (e) { /* ignore */ }
+    Local.remove('rt:gh-token');
+    Local.remove('rt:gist-id');
+    Local.remove('rt:last-pull');
   },
 };
 
@@ -547,7 +551,7 @@ const DataStore = (() => {
         } catch (e) { /* fall through */ }
       }
       try {
-        const v = localStorage.getItem('rt:' + key);
+        const v = Local.get('rt:' + key);
         if (v !== null) return { key, value: v };
       } catch (e) { /* ignore */ }
       return mem[key] !== undefined ? { key, value: mem[key] } : null;
@@ -561,8 +565,7 @@ const DataStore = (() => {
         try { await idbOp('readwrite', s => s.put(value, key)); return { key, value }; }
         catch (e) { /* fall through */ }
       }
-      try { localStorage.setItem('rt:' + key, value); return { key, value }; }
-      catch (e) { return null; }
+      return Local.set('rt:' + key, value) ? { key, value } : null;
     },
   };
 })();
@@ -1208,7 +1211,7 @@ function friendlyExtractError(e) {
 }
 
 function requireApiKey() {
-  const apiKey = localStorage.getItem('anthropic-api-key');
+  const apiKey = Local.get('anthropic-api-key');
   if (!apiKey) {
     const err = new Error('No API key set');
     err.code = 'NO_API_KEY';
@@ -1296,7 +1299,7 @@ function wrapApiError(message) {
   const err = new Error(message);
   err.code = 'API_FAILED';
   try {
-    localStorage.setItem('rt:last-api-error', JSON.stringify({ at: new Date().toISOString(), message }));
+    Local.set('rt:last-api-error', JSON.stringify({ at: new Date().toISOString(), message }));
   } catch (e) { /* ignore */ }
   return err;
 }
@@ -1571,7 +1574,7 @@ class ErrorBoundary extends React.Component {
   }
   componentDidCatch(error, info) {
     try {
-      localStorage.setItem('rt:last-crash', JSON.stringify({
+      Local.set('rt:last-crash', JSON.stringify({
         at: new Date().toISOString(),
         message: String(error && error.message || error),
         stack: String((info && info.componentStack) || '').slice(0, 1200),
@@ -2102,7 +2105,7 @@ function RelationshipTracker() {
   useEffect(() => {
     if (loading || !people.length) { setBackupNag(false); return; }
     let last = null;
-    try { last = localStorage.getItem('rt:last-export'); } catch (e) {}
+    last = Local.get('rt:last-export');
     setBackupNag(!last || daysBetween(last, TODAY()) >= 7);
   }, [people, loading]);
 
@@ -2581,6 +2584,10 @@ function RelationshipTracker() {
           onClose={() => setShowSettings(false)}
           people={people}
           onImportData={async (imported) => { await persist(imported); }}
+          syncState={syncState}
+          onConnectSync={connectSync}
+          onDisconnectSync={disconnectSync}
+          onSyncNow={() => pullFromCloud(false)}
         />
       )}
     </div>
@@ -3841,7 +3848,8 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose }) {
   );
 }
 
-function SyncPanel({ syncState, onConnect, onDisconnect, onSyncNow }) {
+function SyncPanel({ syncState: rawState, onConnect, onDisconnect, onSyncNow }) {
+  const syncState = rawState || { status: Sync.configured() ? 'idle' : 'off', last: Sync.lastPull(), error: '' };
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const connected = syncState.status !== 'off';
@@ -4088,20 +4096,20 @@ function InsightsModal({ people, onClose }) {
 // ---------- Settings (API key, export/import for backup or moving between devices) ----------
 
 function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync, onDisconnectSync, onSyncNow }) {
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('anthropic-api-key') || '');
+  const [apiKey, setApiKey] = useState(() => Local.get('anthropic-api-key') || '');
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
   const [importErr, setImportErr] = useState('');
   const importInputRef = React.useRef(null);
 
   function saveKey() {
-    localStorage.setItem('anthropic-api-key', apiKey.trim());
+    Local.set('anthropic-api-key', apiKey.trim());
     setSaved(true);
     setTimeout(() => setSaved(false), 1800);
   }
 
   function clearKey() {
-    localStorage.removeItem('anthropic-api-key');
+    Local.remove('anthropic-api-key');
     setApiKey('');
   }
 
@@ -4109,7 +4117,7 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
     const blob = { exportedAt: new Date().toISOString(), people };
     const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(blob, null, 2));
     downloadDataUrl(dataUrl, 'relationship-tracker-backup.json');
-    try { localStorage.setItem('rt:last-export', TODAY()); } catch (e) { /* ignore */ }
+    Local.set('rt:last-export', TODAY());
   }
 
   function handleImportFile(e) {
@@ -4199,7 +4207,7 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
             />
             {(() => {
               let last = null;
-              try { last = JSON.parse(localStorage.getItem('rt:last-api-error') || 'null'); } catch (e) {}
+              try { last = JSON.parse(Local.get('rt:last-api-error') || 'null'); } catch (e) {}
               if (!last) return null;
               return (
                 <p className="text-[11px] text-stone-400 mt-2">
@@ -4454,6 +4462,31 @@ const emptyDateForm = {
 
 // ---------- (No seed/example data — a brand-new install starts empty.) ----------
 
+// Some origins (Android content:// URLs, private modes) throw on any localStorage
+// access. Every read and write goes through here so a render can never die on it.
+const Local = {
+  get(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch (e) {
+      return null;
+    }
+  },
+  set(key, value) {
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+  remove(key) {
+    try {
+      localStorage.removeItem(key);
+    } catch (e) {/* ignore */}
+  }
+};
+
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
 // access token with the "gist" permission is all it needs — no server, and the
@@ -4463,46 +4496,28 @@ const GIST_FILE = 'relationship-tracker-data.json';
 const GIST_TAG = 'relationship-tracker: private data store (do not edit by hand)';
 const Sync = {
   token() {
-    try {
-      return localStorage.getItem('rt:gh-token') || '';
-    } catch (e) {
-      return '';
-    }
+    return Local.get('rt:gh-token') || '';
   },
   gistId() {
-    try {
-      return localStorage.getItem('rt:gist-id') || '';
-    } catch (e) {
-      return '';
-    }
+    return Local.get('rt:gist-id') || '';
   },
   lastPull() {
-    try {
-      return localStorage.getItem('rt:last-pull') || '';
-    } catch (e) {
-      return '';
-    }
+    return Local.get('rt:last-pull') || '';
   },
   configured() {
     return !!this.token();
   },
   save(token, gistId) {
-    try {
-      localStorage.setItem('rt:gh-token', token);
-      if (gistId) localStorage.setItem('rt:gist-id', gistId);
-    } catch (e) {/* ignore */}
+    Local.set('rt:gh-token', token);
+    if (gistId) Local.set('rt:gist-id', gistId);
   },
   markPulled(stamp) {
-    try {
-      localStorage.setItem('rt:last-pull', stamp || '');
-    } catch (e) {}
+    Local.set('rt:last-pull', stamp || '');
   },
   clear() {
-    try {
-      localStorage.removeItem('rt:gh-token');
-      localStorage.removeItem('rt:gist-id');
-      localStorage.removeItem('rt:last-pull');
-    } catch (e) {/* ignore */}
+    Local.remove('rt:gh-token');
+    Local.remove('rt:gist-id');
+    Local.remove('rt:last-pull');
   }
 };
 async function ghFetch(path, options) {
@@ -4657,7 +4672,7 @@ const DataStore = (() => {
         } catch (e) {/* fall through */}
       }
       try {
-        const v = localStorage.getItem('rt:' + key);
+        const v = Local.get('rt:' + key);
         if (v !== null) return {
           key,
           value: v
@@ -4686,15 +4701,10 @@ const DataStore = (() => {
           };
         } catch (e) {/* fall through */}
       }
-      try {
-        localStorage.setItem('rt:' + key, value);
-        return {
-          key,
-          value
-        };
-      } catch (e) {
-        return null;
-      }
+      return Local.set('rt:' + key, value) ? {
+        key,
+        value
+      } : null;
     }
   };
 })();
@@ -5400,7 +5410,7 @@ function friendlyExtractError(e) {
   return null; // caller supplies its own default message
 }
 function requireApiKey() {
-  const apiKey = localStorage.getItem('anthropic-api-key');
+  const apiKey = Local.get('anthropic-api-key');
   if (!apiKey) {
     const err = new Error('No API key set');
     err.code = 'NO_API_KEY';
@@ -5489,7 +5499,7 @@ function wrapApiError(message) {
   const err = new Error(message);
   err.code = 'API_FAILED';
   try {
-    localStorage.setItem('rt:last-api-error', JSON.stringify({
+    Local.set('rt:last-api-error', JSON.stringify({
       at: new Date().toISOString(),
       message
     }));
@@ -5797,7 +5807,7 @@ class ErrorBoundary extends React.Component {
   }
   componentDidCatch(error, info) {
     try {
-      localStorage.setItem('rt:last-crash', JSON.stringify({
+      Local.set('rt:last-crash', JSON.stringify({
         at: new Date().toISOString(),
         message: String(error && error.message || error),
         stack: String(info && info.componentStack || '').slice(0, 1200)
@@ -6458,9 +6468,7 @@ function RelationshipTracker() {
       return;
     }
     let last = null;
-    try {
-      last = localStorage.getItem('rt:last-export');
-    } catch (e) {}
+    last = Local.get('rt:last-export');
     setBackupNag(!last || daysBetween(last, TODAY()) >= 7);
   }, [people, loading]);
   const knownChannels = useMemo(() => {
@@ -6917,7 +6925,11 @@ function RelationshipTracker() {
     people: people,
     onImportData: async imported => {
       await persist(imported);
-    }
+    },
+    syncState: syncState,
+    onConnectSync: connectSync,
+    onDisconnectSync: disconnectSync,
+    onSyncNow: () => pullFromCloud(false)
   }));
 }
 
@@ -8591,11 +8603,16 @@ function ChatImportModal({
   }), " ", queue.length > 1 && qIndex < queue.length - 1 ? 'Save & next' : 'Save')))));
 }
 function SyncPanel({
-  syncState,
+  syncState: rawState,
   onConnect,
   onDisconnect,
   onSyncNow
 }) {
+  const syncState = rawState || {
+    status: Sync.configured() ? 'idle' : 'off',
+    last: Sync.lastPull(),
+    error: ''
+  };
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const connected = syncState.status !== 'off';
@@ -8862,18 +8879,18 @@ function SettingsModal({
   onDisconnectSync,
   onSyncNow
 }) {
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('anthropic-api-key') || '');
+  const [apiKey, setApiKey] = useState(() => Local.get('anthropic-api-key') || '');
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
   const [importErr, setImportErr] = useState('');
   const importInputRef = React.useRef(null);
   function saveKey() {
-    localStorage.setItem('anthropic-api-key', apiKey.trim());
+    Local.set('anthropic-api-key', apiKey.trim());
     setSaved(true);
     setTimeout(() => setSaved(false), 1800);
   }
   function clearKey() {
-    localStorage.removeItem('anthropic-api-key');
+    Local.remove('anthropic-api-key');
     setApiKey('');
   }
   function exportData() {
@@ -8883,9 +8900,7 @@ function SettingsModal({
     };
     const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(blob, null, 2));
     downloadDataUrl(dataUrl, 'relationship-tracker-backup.json');
-    try {
-      localStorage.setItem('rt:last-export', TODAY());
-    } catch (e) {/* ignore */}
+    Local.set('rt:last-export', TODAY());
   }
   function handleImportFile(e) {
     const file = e.target.files && e.target.files[0];
@@ -8985,7 +9000,7 @@ function SettingsModal({
   }), (() => {
     let last = null;
     try {
-      last = JSON.parse(localStorage.getItem('rt:last-api-error') || 'null');
+      last = JSON.parse(Local.get('rt:last-api-error') || 'null');
     } catch (e) {}
     if (!last) return null;
     return /*#__PURE__*/React.createElement("p", {
