@@ -365,6 +365,7 @@ const COMMON_CHANNELS = ['Hinge', 'Tinder', 'Bumble', 'In person', 'Through frie
 const emptyPersonForm = {
   name: '', meetingChannel: '', dateMet: '', stage: 'Talking Stage',
   phone: '', notes: '', endReason: '', endDate: '', endNotes: '',
+  relStart: '', relEnd: '', relType: '',
 };
 
 function newPersonRecord(overrides = {}) {
@@ -394,7 +395,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 19:26';
+const BUILD_STAMP = '2026-08-02 20:01';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -700,7 +701,7 @@ function migrateFromFlatList(flat) {
       meetingChannel: '',
       dateMet: dates[0]?.date || '',
       stage: 'Dating',
-      notes: '', endReason: '', endDate: '', endNotes: '',
+      notes: '', endReason: '', endDate: '', endNotes: '', relStart: '', relEnd: '', relType: '',
       photos: [], profilePhotoId: null, conversationLog: [],
       dates,
     };
@@ -814,6 +815,105 @@ function daysFromFlatLog(log) {
     byDate[d].points.push(p);
   });
   return Object.values(byDate).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+}
+
+// ---------- Relationship shape: span, classification, closure ----------
+
+const REL_TYPES = [
+  'Talking only', 'One date', 'Few dates', 'Short-lived', 'Situationship',
+  'Relationship', 'Long-term relationship', 'Rekindled', 'Other',
+];
+
+function ym(iso) { return iso ? String(iso).slice(0, 7) : ''; }
+
+function monthsBetweenYm(a, b) {
+  if (!a || !b) return null;
+  const [ay, am] = a.split('-').map(Number);
+  const [by, bm] = b.split('-').map(Number);
+  return (by - ay) * 12 + (bm - am);
+}
+
+function formatSpan(months) {
+  if (months === null || months === undefined) return '';
+  const m = Math.max(0, months);
+  const years = Math.floor(m / 12), rem = m % 12;
+  if (!years) return rem <= 1 ? 'under a month' : rem + ' months';
+  const yPart = years + (years === 1 ? ' year' : ' years');
+  return rem ? yPart + ' ' + rem + (rem === 1 ? ' month' : ' months') : yPart;
+}
+
+// Start of the relationship: whatever he recorded, else the match, else the
+// first thing on the timeline.
+function relStartYm(person) {
+  if (person.relStart) return ym(person.relStart);
+  if (person.dateMet) return ym(person.dateMet);
+  const first = [...(person.conversationDays || []).map(d => d.date),
+    ...(person.dates || []).map(d => d.date)].filter(Boolean).sort()[0];
+  return ym(first);
+}
+
+function relEndYm(person) {
+  if (person.relEnd) return ym(person.relEnd);
+  if (person.endDate) return ym(person.endDate);
+  if (person.stage === 'Ended') return ym(activityRank(person));
+  return '';
+}
+
+function relSpanMonths(person) {
+  const start = relStartYm(person);
+  if (!start) return null;
+  const end = relEndYm(person) || ym(TODAY());
+  return monthsBetweenYm(start, end);
+}
+
+// A judgement, not a rule — he can override it in the person form.
+function classifyRelationship(person) {
+  if (person.relType) return person.relType;
+  const met = (person.dates || []).filter(d => d.status === 'Completed').length;
+  const months = relSpanMonths(person) || 0;
+
+  // A period entered by hand means he is recording something from memory, so the
+  // duration is the reliable signal — there may be no dates or messages logged.
+  const handEntered = !!(person.relStart || person.relEnd);
+
+  if (person.stage === 'Relationship' || handEntered) {
+    if (months >= 12) return 'Long-term relationship';
+    if (months >= 6) return 'Relationship';
+    if (months >= 3) return 'Situationship';
+    if (months >= 1) return 'Short-lived';
+    return met ? 'Few dates' : 'Talking only';
+  }
+
+  if (!met) return 'Talking only';
+  if (months >= 12) return 'Long-term relationship';
+  if (months >= 6) return 'Relationship';
+  if (met === 1) return 'One date';
+  if (months >= 3 && met >= 4) return 'Situationship';
+  if (met <= 4) return 'Few dates';
+  return 'Short-lived';
+}
+
+// Closed, and how long ago — a thing that ended last month reads differently
+// from one that ended three years ago.
+function closureState(person) {
+  const end = relEndYm(person);
+  const isClosed = person.stage === 'Ended' || !!person.relEnd;
+  if (!isClosed) return { closed: false, label: '', monthsAgo: null };
+  const monthsAgo = end ? monthsBetweenYm(end, ym(TODAY())) : null;
+  let label = 'Closed';
+  if (monthsAgo === null) label = 'Closed — date unknown';
+  else if (monthsAgo <= 2) label = 'Just ended';
+  else if (monthsAgo <= 12) label = 'Ended ' + formatSpan(monthsAgo) + ' ago';
+  else label = 'History — ' + formatSpan(monthsAgo) + ' ago';
+  return { closed: true, label, monthsAgo };
+}
+
+// Live but gone quiet for a season with nothing booked: worth asking about.
+function looksOver(person) {
+  if (person.stage === 'Ended') return false;
+  const quiet = daysQuiet(person);
+  const upcoming = (person.dates || []).some(d => d.status === 'Upcoming' && d.date >= TODAY());
+  return quiet !== null && quiet >= 90 && !upcoming;
 }
 
 function profileIsEmpty(profile) {
@@ -1646,12 +1746,20 @@ READ THE EVIDENCE PROPERLY. This is where a lazy read goes wrong:
 - Vague enthusiasm with no date in the diary is a deflection, not a green light.
 - Where signals conflict, say so. Do not pick the flattering reading.
 
+CLOSED AND HISTORICAL RELATIONSHIPS. You will be told whether this one is live or over, how long it ran, and how long ago it ended. Read the header carefully and answer accordingly:
+- LIVE — everything above applies. Give him the interest level and the next move.
+- RECENTLY ENDED (within about two months) — do not coach him toward her. Say what actually happened and why, honestly, including his own part in it. Doc Love's line applies: when her interest level was low, no message would have saved it, and FIDO — forget it, drive on. The next move is about him, not her: what to do with the next fortnight, whether anything needs closing off, and getting back in circulation.
+- OVER FOR SOME TIME, OR UPLOADED FOR THE RECORD — this is a post-mortem, not a rescue. Do not suggest contacting her. Read the arc: how it started, what her interest level looked like at its peak and when it turned, what the turning point was, whether he saw it at the time, and how his own behaviour helped or hurt. Name the pattern plainly. The value here is what he carries into the next one.
+- Where a historical entry is thin — a few dates and no notes — say what the record cannot tell you rather than inventing a narrative.
+
+JUDGING WHAT IT WAS. You are given a classification and a duration. Sanity-check them against the evidence and say so if they look wrong: months of messaging with two meetings is a situationship however it is labelled; six dates in three weeks that stopped dead is a short-lived thing, not a relationship. Use the duration in your reading — a six-week thing ending is not the same event as a two-year thing ending, and your tone should reflect that.
+
 Respond with ONLY a JSON object, no other text, no markdown fences:
 {
-"interestLevel": integer 0-100 — your estimate of HER interest level in Doc Love's sense, judged from behaviour, not words. Be honest and specific rather than generous. If there is too little evidence, use 50 and say so in the status.
-"vibe": string — three to five words naming the temperature, e.g. "High interest, moving fast", "Polite, low interest", "Cooling since the second date", "Too early to call".
-"status": string — 3-5 sentences addressed to him, on what is actually happening between you and her. Cite the concrete evidence: what he wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
-"recommendation": string — 2-4 sentences on the single next move, why it works, and what to avoid. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him to stop investing.
+"interestLevel": integer 0-100 — for a live connection, her interest level now. For one that is over, her interest level at its highest point, which tells him what he was actually working with, judged from behaviour, not words. Be honest and specific rather than generous. If there is too little evidence, use 50 and say so in the status.
+"vibe": string — three to five words. For a live connection, the temperature now. For one that is over, what it amounted to, e.g. "Ran out of road", "She was never in it", "Good while it lasted", e.g. "High interest, moving fast", "Polite, low interest", "Cooling since the second date", "Too early to call".
+"status": string — 3-5 sentences addressed to him. If it is live, what is actually happening between you and her. If it is over, what happened and why, across the whole arc. Cite the concrete evidence: what he wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
+"recommendation": string — 2-4 sentences. If it is live, the single next move, why it works and what to avoid. If it is over, the lesson to carry forward: the pattern to watch for, the thing to do differently, or the standard to hold next time. Never suggest contacting a woman it is over with. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him to stop investing.
 }
 Judge only on the facts given. Never invent a message, a date, a place or a feeling. No flattery, no hedging, no therapy-speak. Respond with the JSON object only.`;
 
@@ -1683,8 +1791,25 @@ function conversationSignals(person) {
 function buildCoachContext(person) {
   const lines = [];
   const p = { ...emptyProfile(), ...(person.profile || {}) };
+  const closure = closureState(person);
+  const span = relSpanMonths(person);
+  const startYm = relStartYm(person), endYm = relEndYm(person);
   lines.push('Name: ' + person.name);
   lines.push('Stage: ' + person.stage);
+  lines.push('What this was: ' + classifyRelationship(person)
+    + (person.relType ? ' (his own classification)' : ' (judged from the record — challenge it if it looks wrong)'));
+  if (startYm) {
+    lines.push('Ran from ' + startYm + (endYm ? ' to ' + endYm : ' to now')
+      + (span !== null ? ' — ' + formatSpan(span) : ''));
+  }
+  lines.push(closure.closed
+    ? 'THIS ONE IS OVER. ' + closure.label
+      + (closure.monthsAgo !== null && closure.monthsAgo > 2
+        ? ' — treat this as a post-mortem for the record, not a live case. Do not suggest contacting her.'
+        : ' — recently. Do not coach him back toward her.')
+    : 'THIS ONE IS LIVE.');
+  if (person.endReason) lines.push('How it ended: ' + person.endReason);
+  if (person.endNotes) lines.push('His account of the ending: ' + person.endNotes);
   if (person.meetingChannel) lines.push('Met through: ' + person.meetingChannel);
   if (person.dateMet) lines.push('Matched/connected: ' + person.dateMet + ' (' + daysBetween(person.dateMet, TODAY()) + ' days ago)');
   PROFILE_FIELDS.forEach(([k, label]) => { if (p[k]) lines.push(label + ': ' + p[k]); });
@@ -2137,6 +2262,16 @@ function RelationshipTracker() {
 
   // For contact that leaves no screenshot — a phone call, a voice note, bumping
   // into her — so the quiet counter reflects reality.
+  async function closeOutRelationship() {
+    if (!selected) return;
+    const endYm = ym(activityRank(selected)) || ym(TODAY());
+    await persist(peopleRef.current.map(p => p.id === selected.id
+      ? { ...p, stage: 'Ended', relEnd: p.relEnd || endYm, endDate: p.endDate || activityRank(p) || TODAY(),
+          endReason: p.endReason || 'Faded out' }
+      : p));
+    setNotice('Marked as ended in ' + endYm + '. Edit the details if that is not right.');
+  }
+
   async function logContactToday() {
     if (!selected) return;
     await persist(peopleRef.current.map(p => p.id === selected.id ? { ...p, lastContact: TODAY() } : p));
@@ -2529,6 +2664,29 @@ function RelationshipTracker() {
                   <div className="mt-2 text-sm text-stone-600 bg-stone-50 border border-stone-200 rounded-md p-2">
                     <div className="flex items-center gap-1.5 font-medium text-stone-800"><Flag className="w-3.5 h-3.5" /> {selected.endReason || 'Ended'}</div>
                     {selected.endDate && <div>Ended {selected.endDate}</div>}
+                    {(() => {
+                      const span = relSpanMonths(selected);
+                      const closure = closureState(selected);
+                      const start = relStartYm(selected), end = relEndYm(selected);
+                      if (!start) return null;
+                      const fmt = m => m ? new Date(m + '-01T00:00:00').toLocaleDateString('en-IE', { month: 'short', year: 'numeric' }) : '';
+                      return (
+                        <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                          <span className="text-stone-600">
+                            {fmt(start)}{end ? ' – ' + fmt(end) : ' – now'}
+                            {span !== null ? ' · ' + formatSpan(span) : ''}
+                          </span>
+                          <span className="text-[10px] uppercase tracking-wide bg-stone-100 text-stone-700 rounded-full px-2 py-0.5">
+                            {classifyRelationship(selected)}
+                          </span>
+                          {closure.closed && (
+                            <span className="text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5">
+                              {closure.label}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {selected.endNotes && <div className="mt-1">{selected.endNotes}</div>}
                   </div>
                 )}
@@ -2571,6 +2729,18 @@ function RelationshipTracker() {
               </div>
             );
           })()}
+
+          {looksOver(selected) && (
+            <div className="bg-stone-100 border border-stone-300 rounded-lg p-3 mb-4 flex items-center justify-between gap-3">
+              <p className="text-sm text-stone-700">
+                Nothing for {daysQuiet(selected)} days and nothing booked. Is this one over?
+              </p>
+              <button onClick={closeOutRelationship}
+                className="shrink-0 text-sm font-medium text-stone-800 border border-stone-400 rounded-md px-2.5 py-1 hover:bg-white">
+                Close it out
+              </button>
+            </div>
+          )}
 
           <StatusPanel
             read={selected.coachRead || null}
@@ -2916,9 +3086,20 @@ function RelationshipTracker() {
                         <MessageCircle className="w-3 h-3" />No contact logged in {quiet} days
                       </div>
                     )}
-                    {p.stage === 'Ended' && p.endReason && (
-                      <div className="mt-1 flex items-center gap-1 text-xs text-stone-500"><Flag className="w-3 h-3" />{p.endReason}</div>
-                    )}
+                    {p.stage === 'Ended' && (() => {
+                      const span = relSpanMonths(p);
+                      const closure = closureState(p);
+                      return (
+                        <div className="mt-1 flex items-center gap-1 text-xs text-stone-500 flex-wrap">
+                          <Flag className="w-3 h-3" />
+                          <span>
+                            {classifyRelationship(p)}{span !== null ? ' · ' + formatSpan(span) : ''}
+                            {p.endReason ? ' · ' + p.endReason : ''}
+                            {closure.label ? ' · ' + closure.label.toLowerCase() : ''}
+                          </span>
+                        </div>
+                      );
+                    })()}
                     </div>
                   </div>
                   <ChevronRight className="w-4 h-4 text-stone-400 shrink-0 mt-1" />
@@ -3151,6 +3332,29 @@ function PersonFormModal({ form, setForm, isNew, onCancel, onSave, knownChannels
           onFocus={focusScroll} style={fieldScrollMargin}
           className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900">
           {STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Started" hint="Month">
+          <input type="month" value={form.relStart} onChange={e => setForm(f => ({ ...f, relStart: e.target.value }))}
+            className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
+        </Field>
+        <Field label="Ended" hint="Month, if over">
+          <input type="month" value={form.relEnd} onChange={e => setForm(f => ({ ...f, relEnd: e.target.value }))}
+            className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
+        </Field>
+      </div>
+      {form.relStart && (
+        <p className="text-xs text-stone-500 -mt-1">
+          {formatSpan(monthsBetweenYm(form.relStart, form.relEnd || TODAY().slice(0, 7)))}
+          {form.relEnd ? '' : ' so far'}
+        </p>
+      )}
+      <Field label="What it was" hint="Leave blank to have it judged from the record">
+        <select value={form.relType} onChange={e => setForm(f => ({ ...f, relType: e.target.value }))}
+          className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900">
+          <option value="">Work it out from the record</option>
+          {REL_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
       </Field>
       <Field label="Notes">
@@ -4943,7 +5147,10 @@ const emptyPersonForm = {
   notes: '',
   endReason: '',
   endDate: '',
-  endNotes: ''
+  endNotes: '',
+  relStart: '',
+  relEnd: '',
+  relType: ''
 };
 function newPersonRecord(overrides = {}) {
   return {
@@ -5006,7 +5213,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 19:26';
+const BUILD_STAMP = '2026-08-02 20:01';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -5373,6 +5580,9 @@ function migrateFromFlatList(flat) {
       endReason: '',
       endDate: '',
       endNotes: '',
+      relStart: '',
+      relEnd: '',
+      relType: '',
       photos: [],
       profilePhotoId: null,
       conversationLog: [],
@@ -5526,6 +5736,102 @@ function daysFromFlatLog(log) {
     byDate[d].points.push(p);
   });
   return Object.values(byDate).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+}
+
+// ---------- Relationship shape: span, classification, closure ----------
+
+const REL_TYPES = ['Talking only', 'One date', 'Few dates', 'Short-lived', 'Situationship', 'Relationship', 'Long-term relationship', 'Rekindled', 'Other'];
+function ym(iso) {
+  return iso ? String(iso).slice(0, 7) : '';
+}
+function monthsBetweenYm(a, b) {
+  if (!a || !b) return null;
+  const [ay, am] = a.split('-').map(Number);
+  const [by, bm] = b.split('-').map(Number);
+  return (by - ay) * 12 + (bm - am);
+}
+function formatSpan(months) {
+  if (months === null || months === undefined) return '';
+  const m = Math.max(0, months);
+  const years = Math.floor(m / 12),
+    rem = m % 12;
+  if (!years) return rem <= 1 ? 'under a month' : rem + ' months';
+  const yPart = years + (years === 1 ? ' year' : ' years');
+  return rem ? yPart + ' ' + rem + (rem === 1 ? ' month' : ' months') : yPart;
+}
+
+// Start of the relationship: whatever he recorded, else the match, else the
+// first thing on the timeline.
+function relStartYm(person) {
+  if (person.relStart) return ym(person.relStart);
+  if (person.dateMet) return ym(person.dateMet);
+  const first = [...(person.conversationDays || []).map(d => d.date), ...(person.dates || []).map(d => d.date)].filter(Boolean).sort()[0];
+  return ym(first);
+}
+function relEndYm(person) {
+  if (person.relEnd) return ym(person.relEnd);
+  if (person.endDate) return ym(person.endDate);
+  if (person.stage === 'Ended') return ym(activityRank(person));
+  return '';
+}
+function relSpanMonths(person) {
+  const start = relStartYm(person);
+  if (!start) return null;
+  const end = relEndYm(person) || ym(TODAY());
+  return monthsBetweenYm(start, end);
+}
+
+// A judgement, not a rule — he can override it in the person form.
+function classifyRelationship(person) {
+  if (person.relType) return person.relType;
+  const met = (person.dates || []).filter(d => d.status === 'Completed').length;
+  const months = relSpanMonths(person) || 0;
+
+  // A period entered by hand means he is recording something from memory, so the
+  // duration is the reliable signal — there may be no dates or messages logged.
+  const handEntered = !!(person.relStart || person.relEnd);
+  if (person.stage === 'Relationship' || handEntered) {
+    if (months >= 12) return 'Long-term relationship';
+    if (months >= 6) return 'Relationship';
+    if (months >= 3) return 'Situationship';
+    if (months >= 1) return 'Short-lived';
+    return met ? 'Few dates' : 'Talking only';
+  }
+  if (!met) return 'Talking only';
+  if (months >= 12) return 'Long-term relationship';
+  if (months >= 6) return 'Relationship';
+  if (met === 1) return 'One date';
+  if (months >= 3 && met >= 4) return 'Situationship';
+  if (met <= 4) return 'Few dates';
+  return 'Short-lived';
+}
+
+// Closed, and how long ago — a thing that ended last month reads differently
+// from one that ended three years ago.
+function closureState(person) {
+  const end = relEndYm(person);
+  const isClosed = person.stage === 'Ended' || !!person.relEnd;
+  if (!isClosed) return {
+    closed: false,
+    label: '',
+    monthsAgo: null
+  };
+  const monthsAgo = end ? monthsBetweenYm(end, ym(TODAY())) : null;
+  let label = 'Closed';
+  if (monthsAgo === null) label = 'Closed — date unknown';else if (monthsAgo <= 2) label = 'Just ended';else if (monthsAgo <= 12) label = 'Ended ' + formatSpan(monthsAgo) + ' ago';else label = 'History — ' + formatSpan(monthsAgo) + ' ago';
+  return {
+    closed: true,
+    label,
+    monthsAgo
+  };
+}
+
+// Live but gone quiet for a season with nothing booked: worth asking about.
+function looksOver(person) {
+  if (person.stage === 'Ended') return false;
+  const quiet = daysQuiet(person);
+  const upcoming = (person.dates || []).some(d => d.status === 'Upcoming' && d.date >= TODAY());
+  return quiet !== null && quiet >= 90 && !upcoming;
 }
 function profileIsEmpty(profile) {
   if (!profile) return true;
@@ -6438,12 +6744,20 @@ READ THE EVIDENCE PROPERLY. This is where a lazy read goes wrong:
 - Vague enthusiasm with no date in the diary is a deflection, not a green light.
 - Where signals conflict, say so. Do not pick the flattering reading.
 
+CLOSED AND HISTORICAL RELATIONSHIPS. You will be told whether this one is live or over, how long it ran, and how long ago it ended. Read the header carefully and answer accordingly:
+- LIVE — everything above applies. Give him the interest level and the next move.
+- RECENTLY ENDED (within about two months) — do not coach him toward her. Say what actually happened and why, honestly, including his own part in it. Doc Love's line applies: when her interest level was low, no message would have saved it, and FIDO — forget it, drive on. The next move is about him, not her: what to do with the next fortnight, whether anything needs closing off, and getting back in circulation.
+- OVER FOR SOME TIME, OR UPLOADED FOR THE RECORD — this is a post-mortem, not a rescue. Do not suggest contacting her. Read the arc: how it started, what her interest level looked like at its peak and when it turned, what the turning point was, whether he saw it at the time, and how his own behaviour helped or hurt. Name the pattern plainly. The value here is what he carries into the next one.
+- Where a historical entry is thin — a few dates and no notes — say what the record cannot tell you rather than inventing a narrative.
+
+JUDGING WHAT IT WAS. You are given a classification and a duration. Sanity-check them against the evidence and say so if they look wrong: months of messaging with two meetings is a situationship however it is labelled; six dates in three weeks that stopped dead is a short-lived thing, not a relationship. Use the duration in your reading — a six-week thing ending is not the same event as a two-year thing ending, and your tone should reflect that.
+
 Respond with ONLY a JSON object, no other text, no markdown fences:
 {
-"interestLevel": integer 0-100 — your estimate of HER interest level in Doc Love's sense, judged from behaviour, not words. Be honest and specific rather than generous. If there is too little evidence, use 50 and say so in the status.
-"vibe": string — three to five words naming the temperature, e.g. "High interest, moving fast", "Polite, low interest", "Cooling since the second date", "Too early to call".
-"status": string — 3-5 sentences addressed to him, on what is actually happening between you and her. Cite the concrete evidence: what he wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
-"recommendation": string — 2-4 sentences on the single next move, why it works, and what to avoid. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him to stop investing.
+"interestLevel": integer 0-100 — for a live connection, her interest level now. For one that is over, her interest level at its highest point, which tells him what he was actually working with, judged from behaviour, not words. Be honest and specific rather than generous. If there is too little evidence, use 50 and say so in the status.
+"vibe": string — three to five words. For a live connection, the temperature now. For one that is over, what it amounted to, e.g. "Ran out of road", "She was never in it", "Good while it lasted", e.g. "High interest, moving fast", "Polite, low interest", "Cooling since the second date", "Too early to call".
+"status": string — 3-5 sentences addressed to him. If it is live, what is actually happening between you and her. If it is over, what happened and why, across the whole arc. Cite the concrete evidence: what he wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
+"recommendation": string — 2-4 sentences. If it is live, the single next move, why it works and what to avoid. If it is over, the lesson to carry forward: the pattern to watch for, the thing to do differently, or the standard to hold next time. Never suggest contacting a woman it is over with. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him to stop investing.
 }
 Judge only on the facts given. Never invent a message, a date, a place or a feeling. No flattery, no hedging, no therapy-speak. Respond with the JSON object only.`;
 
@@ -6480,8 +6794,19 @@ function buildCoachContext(person) {
     ...emptyProfile(),
     ...(person.profile || {})
   };
+  const closure = closureState(person);
+  const span = relSpanMonths(person);
+  const startYm = relStartYm(person),
+    endYm = relEndYm(person);
   lines.push('Name: ' + person.name);
   lines.push('Stage: ' + person.stage);
+  lines.push('What this was: ' + classifyRelationship(person) + (person.relType ? ' (his own classification)' : ' (judged from the record — challenge it if it looks wrong)'));
+  if (startYm) {
+    lines.push('Ran from ' + startYm + (endYm ? ' to ' + endYm : ' to now') + (span !== null ? ' — ' + formatSpan(span) : ''));
+  }
+  lines.push(closure.closed ? 'THIS ONE IS OVER. ' + closure.label + (closure.monthsAgo !== null && closure.monthsAgo > 2 ? ' — treat this as a post-mortem for the record, not a live case. Do not suggest contacting her.' : ' — recently. Do not coach him back toward her.') : 'THIS ONE IS LIVE.');
+  if (person.endReason) lines.push('How it ended: ' + person.endReason);
+  if (person.endNotes) lines.push('His account of the ending: ' + person.endNotes);
   if (person.meetingChannel) lines.push('Met through: ' + person.meetingChannel);
   if (person.dateMet) lines.push('Matched/connected: ' + person.dateMet + ' (' + daysBetween(person.dateMet, TODAY()) + ' days ago)');
   PROFILE_FIELDS.forEach(([k, label]) => {
@@ -6971,6 +7296,18 @@ function RelationshipTracker() {
 
   // For contact that leaves no screenshot — a phone call, a voice note, bumping
   // into her — so the quiet counter reflects reality.
+  async function closeOutRelationship() {
+    if (!selected) return;
+    const endYm = ym(activityRank(selected)) || ym(TODAY());
+    await persist(peopleRef.current.map(p => p.id === selected.id ? {
+      ...p,
+      stage: 'Ended',
+      relEnd: p.relEnd || endYm,
+      endDate: p.endDate || activityRank(p) || TODAY(),
+      endReason: p.endReason || 'Faded out'
+    } : p));
+    setNotice('Marked as ended in ' + endYm + '. Edit the details if that is not right.');
+  }
   async function logContactToday() {
     if (!selected) return;
     await persist(peopleRef.current.map(p => p.id === selected.id ? {
@@ -7440,7 +7777,26 @@ function RelationshipTracker() {
       className: "flex items-center gap-1.5 font-medium text-stone-800"
     }, /*#__PURE__*/React.createElement(Flag, {
       className: "w-3.5 h-3.5"
-    }), " ", selected.endReason || 'Ended'), selected.endDate && /*#__PURE__*/React.createElement("div", null, "Ended ", selected.endDate), selected.endNotes && /*#__PURE__*/React.createElement("div", {
+    }), " ", selected.endReason || 'Ended'), selected.endDate && /*#__PURE__*/React.createElement("div", null, "Ended ", selected.endDate), (() => {
+      const span = relSpanMonths(selected);
+      const closure = closureState(selected);
+      const start = relStartYm(selected),
+        end = relEndYm(selected);
+      if (!start) return null;
+      const fmt = m => m ? new Date(m + '-01T00:00:00').toLocaleDateString('en-IE', {
+        month: 'short',
+        year: 'numeric'
+      }) : '';
+      return /*#__PURE__*/React.createElement("div", {
+        className: "flex items-center gap-1.5 flex-wrap mt-0.5"
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "text-stone-600"
+      }, fmt(start), end ? ' – ' + fmt(end) : ' – now', span !== null ? ' · ' + formatSpan(span) : ''), /*#__PURE__*/React.createElement("span", {
+        className: "text-[10px] uppercase tracking-wide bg-stone-100 text-stone-700 rounded-full px-2 py-0.5"
+      }, classifyRelationship(selected)), closure.closed && /*#__PURE__*/React.createElement("span", {
+        className: "text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5"
+      }, closure.label));
+    })(), selected.endNotes && /*#__PURE__*/React.createElement("div", {
       className: "mt-1"
     }, selected.endNotes)))), /*#__PURE__*/React.createElement("div", {
       className: "flex flex-col gap-1 shrink-0"
@@ -7471,7 +7827,14 @@ function RelationshipTracker() {
         onClick: logContactToday,
         className: "underline text-stone-500 hover:text-stone-800"
       }, "Log contact today"), ' ', "so the quiet counter stays accurate."));
-    })(), /*#__PURE__*/React.createElement(StatusPanel, {
+    })(), looksOver(selected) && /*#__PURE__*/React.createElement("div", {
+      className: "bg-stone-100 border border-stone-300 rounded-lg p-3 mb-4 flex items-center justify-between gap-3"
+    }, /*#__PURE__*/React.createElement("p", {
+      className: "text-sm text-stone-700"
+    }, "Nothing for ", daysQuiet(selected), " days and nothing booked. Is this one over?"), /*#__PURE__*/React.createElement("button", {
+      onClick: closeOutRelationship,
+      className: "shrink-0 text-sm font-medium text-stone-800 border border-stone-400 rounded-md px-2.5 py-1 hover:bg-white"
+    }, "Close it out")), /*#__PURE__*/React.createElement(StatusPanel, {
       read: selected.coachRead || null,
       busy: coachBusy,
       error: coachError,
@@ -7803,11 +8166,15 @@ function RelationshipTracker() {
       className: `mt-1 flex items-center gap-1 text-xs ${quiet >= 21 ? 'text-red-700' : 'text-amber-700'}`
     }, /*#__PURE__*/React.createElement(MessageCircle, {
       className: "w-3 h-3"
-    }), "No contact logged in ", quiet, " days"), p.stage === 'Ended' && p.endReason && /*#__PURE__*/React.createElement("div", {
-      className: "mt-1 flex items-center gap-1 text-xs text-stone-500"
-    }, /*#__PURE__*/React.createElement(Flag, {
-      className: "w-3 h-3"
-    }), p.endReason))), /*#__PURE__*/React.createElement(ChevronRight, {
+    }), "No contact logged in ", quiet, " days"), p.stage === 'Ended' && (() => {
+      const span = relSpanMonths(p);
+      const closure = closureState(p);
+      return /*#__PURE__*/React.createElement("div", {
+        className: "mt-1 flex items-center gap-1 text-xs text-stone-500 flex-wrap"
+      }, /*#__PURE__*/React.createElement(Flag, {
+        className: "w-3 h-3"
+      }), /*#__PURE__*/React.createElement("span", null, classifyRelationship(p), span !== null ? ' · ' + formatSpan(span) : '', p.endReason ? ' · ' + p.endReason : '', closure.label ? ' · ' + closure.label.toLowerCase() : ''));
+    })())), /*#__PURE__*/React.createElement(ChevronRight, {
       className: "w-4 h-4 text-stone-400 shrink-0 mt-1"
     })), p.coachRead && p.stage !== 'Ended' && /*#__PURE__*/React.createElement("div", {
       className: "mt-3 pt-3 border-t border-stone-100"
@@ -8093,7 +8460,48 @@ function PersonFormModal({
   }, STAGES.map(s => /*#__PURE__*/React.createElement("option", {
     key: s,
     value: s
-  }, s)))), /*#__PURE__*/React.createElement(Field, {
+  }, s)))), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-2"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Started",
+    hint: "Month"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "month",
+    value: form.relStart,
+    onChange: e => setForm(f => ({
+      ...f,
+      relStart: e.target.value
+    })),
+    className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Ended",
+    hint: "Month, if over"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "month",
+    value: form.relEnd,
+    onChange: e => setForm(f => ({
+      ...f,
+      relEnd: e.target.value
+    })),
+    className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }))), form.relStart && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-500 -mt-1"
+  }, formatSpan(monthsBetweenYm(form.relStart, form.relEnd || TODAY().slice(0, 7))), form.relEnd ? '' : ' so far'), /*#__PURE__*/React.createElement(Field, {
+    label: "What it was",
+    hint: "Leave blank to have it judged from the record"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: form.relType,
+    onChange: e => setForm(f => ({
+      ...f,
+      relType: e.target.value
+    })),
+    className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Work it out from the record"), REL_TYPES.map(t => /*#__PURE__*/React.createElement("option", {
+    key: t,
+    value: t
+  }, t)))), /*#__PURE__*/React.createElement(Field, {
     label: "Notes"
   }, /*#__PURE__*/React.createElement("textarea", {
     value: form.notes,
