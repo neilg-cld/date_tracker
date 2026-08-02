@@ -395,7 +395,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 20:37';
+const BUILD_STAMP = '2026-08-02 20:47';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -2121,6 +2121,7 @@ function RelationshipTracker() {
   const [notice, setNotice] = useState('');
   const [dateConfirm, setDateConfirm] = useState(null);
   const [backupNag, setBackupNag] = useState(false);
+  const [exportStamp, setExportStamp] = useState('');
   const [syncState, setSyncState] = useState({ status: Sync.configured() ? 'idle' : 'off', last: Sync.lastPull(), error: '' });
   const [syncConflict, setSyncConflict] = useState(null);
   const pushTimer = React.useRef(null);
@@ -2360,12 +2361,6 @@ function RelationshipTracker() {
       : p));
     setContactNote(null);
     setNotice('Recorded.');
-  }
-
-  async function logContactToday() {
-    if (!selected) return;
-    await persist(peopleRef.current.map(p => p.id === selected.id ? { ...p, lastContact: TODAY() } : p));
-    setNotice('Contact logged for ' + formatDayLabel(TODAY()) + '.');
   }
 
   async function clearConversation() {
@@ -2688,10 +2683,9 @@ function RelationshipTracker() {
   // anything worth losing and none has been taken in the last week.
   useEffect(() => {
     if (loading || !people.length) { setBackupNag(false); return; }
-    let last = null;
-    last = Local.get('rt:last-export');
-    setBackupNag(!last || daysBetween(last, TODAY()) >= 7);
-  }, [people, loading]);
+    const last = Local.get('rt:last-export');
+    setBackupNag(!last || daysBetween(last, TODAY()) >= 30);
+  }, [people, loading, exportStamp]);
 
   const knownChannels = useMemo(() => {
     const set = new Set(COMMON_CHANNELS);
@@ -2805,10 +2799,10 @@ function RelationshipTracker() {
                 )}
                 <p className="text-xs text-stone-400 mt-1.5">
                   Spoke by phone, or saw her, with no chat to import?{' '}
-                  <button onClick={logContactToday} className="underline text-stone-500 hover:text-stone-800">
-                    Log contact today
+                  <button onClick={() => setContactNote({})} className="underline text-stone-500 hover:text-stone-800">
+                    Write it up
                   </button>
-                  {' '}so the quiet counter stays accurate.
+                  {' '}— you can set any date, so old contact can go in too.
                 </p>
               </div>
             );
@@ -3012,6 +3006,7 @@ function RelationshipTracker() {
             onConnectSync={connectSync}
             onDisconnectSync={disconnectSync}
             onSyncNow={() => pullFromCloud(false)}
+            onExported={(d) => { setExportStamp(d); setBackupNag(false); }}
           />
         )}
         {error && <ErrorToast message={error} />}
@@ -3079,7 +3074,7 @@ function RelationshipTracker() {
         {backupNag && (
           <div className="mb-4 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 flex items-center justify-between gap-3">
             <p className="text-sm text-amber-900">
-              No backup in a while. Saved data is tied to this file only.
+              No backup in the last 30 days.
             </p>
             <button onClick={() => setShowSettings(true)}
               className="shrink-0 text-sm font-medium text-amber-900 underline">Back up</button>
@@ -3272,6 +3267,7 @@ function RelationshipTracker() {
           onConnectSync={connectSync}
           onDisconnectSync={disconnectSync}
           onSyncNow={() => pullFromCloud(false)}
+          onExported={(d) => { setExportStamp(d); setBackupNag(false); }}
         />
       )}
     </div>
@@ -4217,7 +4213,7 @@ function ContactNoteModal({ initial, onCancel, onSave }) {
             {CONTACT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         </Field>
-        <Field label="When">
+        <Field label="When" hint="Backdate freely">
           <input type="date" value={date} onChange={e => setDate(e.target.value)} className={inputCls} />
         </Field>
       </div>
@@ -4981,7 +4977,7 @@ function InsightsModal({ people, onClose }) {
 
 // ---------- Settings (API key, export/import for backup or moving between devices) ----------
 
-function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync, onDisconnectSync, onSyncNow }) {
+function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync, onDisconnectSync, onSyncNow, onExported }) {
   const [apiKey, setApiKey] = useState(() => Local.get('anthropic-api-key') || '');
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -5004,6 +5000,7 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
     const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(blob, null, 2));
     downloadDataUrl(dataUrl, 'relationship-tracker-backup.json');
     Local.set('rt:last-export', TODAY());
+    if (onExported) onExported(TODAY());
   }
 
   function handleImportFile(e) {
@@ -5378,7 +5375,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 20:37';
+const BUILD_STAMP = '2026-08-02 20:47';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -7288,6 +7285,7 @@ function RelationshipTracker() {
   const [notice, setNotice] = useState('');
   const [dateConfirm, setDateConfirm] = useState(null);
   const [backupNag, setBackupNag] = useState(false);
+  const [exportStamp, setExportStamp] = useState('');
   const [syncState, setSyncState] = useState({
     status: Sync.configured() ? 'idle' : 'off',
     last: Sync.lastPull(),
@@ -7605,14 +7603,6 @@ function RelationshipTracker() {
     } : p));
     setContactNote(null);
     setNotice('Recorded.');
-  }
-  async function logContactToday() {
-    if (!selected) return;
-    await persist(peopleRef.current.map(p => p.id === selected.id ? {
-      ...p,
-      lastContact: TODAY()
-    } : p));
-    setNotice('Contact logged for ' + formatDayLabel(TODAY()) + '.');
   }
   async function clearConversation() {
     if (!selected) return;
@@ -7989,10 +7979,9 @@ function RelationshipTracker() {
       setBackupNag(false);
       return;
     }
-    let last = null;
-    last = Local.get('rt:last-export');
-    setBackupNag(!last || daysBetween(last, TODAY()) >= 7);
-  }, [people, loading]);
+    const last = Local.get('rt:last-export');
+    setBackupNag(!last || daysBetween(last, TODAY()) >= 30);
+  }, [people, loading, exportStamp]);
   const knownChannels = useMemo(() => {
     const set = new Set(COMMON_CHANNELS);
     people.forEach(p => {
@@ -8107,9 +8096,9 @@ function RelationshipTracker() {
       }, "Last activity ", quiet, " day", quiet === 1 ? '' : 's', " ago."), /*#__PURE__*/React.createElement("p", {
         className: "text-xs text-stone-400 mt-1.5"
       }, "Spoke by phone, or saw her, with no chat to import?", ' ', /*#__PURE__*/React.createElement("button", {
-        onClick: logContactToday,
+        onClick: () => setContactNote({}),
         className: "underline text-stone-500 hover:text-stone-800"
-      }, "Log contact today"), ' ', "so the quiet counter stays accurate."));
+      }, "Write it up"), ' ', "— you can set any date, so old contact can go in too."));
     })(), looksOver(selected) && /*#__PURE__*/React.createElement("div", {
       className: "bg-stone-100 border border-stone-300 rounded-lg p-3 mb-4 flex items-center justify-between gap-3"
     }, /*#__PURE__*/React.createElement("p", {
@@ -8283,7 +8272,11 @@ function RelationshipTracker() {
       syncState: syncState,
       onConnectSync: connectSync,
       onDisconnectSync: disconnectSync,
-      onSyncNow: () => pullFromCloud(false)
+      onSyncNow: () => pullFromCloud(false),
+      onExported: d => {
+        setExportStamp(d);
+        setBackupNag(false);
+      }
     }), error && /*#__PURE__*/React.createElement(ErrorToast, {
       message: error
     }));
@@ -8365,7 +8358,7 @@ function RelationshipTracker() {
     className: "mb-4 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 flex items-center justify-between gap-3"
   }, /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-amber-900"
-  }, "No backup in a while. Saved data is tied to this file only."), /*#__PURE__*/React.createElement("button", {
+  }, "No backup in the last 30 days."), /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowSettings(true),
     className: "shrink-0 text-sm font-medium text-amber-900 underline"
   }, "Back up")), !loading && people.length > 0 && /*#__PURE__*/React.createElement("div", {
@@ -8519,7 +8512,11 @@ function RelationshipTracker() {
     syncState: syncState,
     onConnectSync: connectSync,
     onDisconnectSync: disconnectSync,
-    onSyncNow: () => pullFromCloud(false)
+    onSyncNow: () => pullFromCloud(false),
+    onExported: d => {
+      setExportStamp(d);
+      setBackupNag(false);
+    }
   }));
 }
 
@@ -9814,7 +9811,8 @@ function ContactNoteModal({
     key: t,
     value: t
   }, t)))), /*#__PURE__*/React.createElement(Field, {
-    label: "When"
+    label: "When",
+    hint: "Backdate freely"
   }, /*#__PURE__*/React.createElement("input", {
     type: "date",
     value: date,
@@ -10687,7 +10685,8 @@ function SettingsModal({
   syncState,
   onConnectSync,
   onDisconnectSync,
-  onSyncNow
+  onSyncNow,
+  onExported
 }) {
   const [apiKey, setApiKey] = useState(() => Local.get('anthropic-api-key') || '');
   const [showKey, setShowKey] = useState(false);
@@ -10711,6 +10710,7 @@ function SettingsModal({
     const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(blob, null, 2));
     downloadDataUrl(dataUrl, 'relationship-tracker-backup.json');
     Local.set('rt:last-export', TODAY());
+    if (onExported) onExported(TODAY());
   }
   function handleImportFile(e) {
     const file = e.target.files && e.target.files[0];
