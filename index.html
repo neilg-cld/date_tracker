@@ -395,7 +395,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 20:47';
+const BUILD_STAMP = '2026-08-03 15:13';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -1064,7 +1064,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
     "date": string or null (YYYY-MM-DD. RESOLVE THE DIVIDER — see the dating rules below. Null only if this session has no day information of any kind above it.),
     "summary": string — two or three sentences addressed to him on what this session was about and how it went between you and her. Second person throughout. Not a transcript.
     "facts": array of short strings — the things worth remembering: what she revealed about her life, work, family, plans or opinions; anything agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, "how was your day", compliments and other small talk. Empty array if the session was pure small talk.
-    "points": array of {"from": "she" or "me", "point": string, "timeLabel": string or null} — the underlying chronology, one condensed line per meaningful exchange of about 8-15 words, in order. This is the detail behind the summary.
+    "points": array of {"from": "she" or "me", "point": string, "timeLabel": string or null} — the underlying chronology, one condensed line per meaningful exchange of about 8-15 words, in order. AT MOST 8 PER SESSION: if the day ran longer than that, keep the 8 that matter and let the summary and facts carry the rest. Never let this array make your reply so long that it gets cut off — the summary and facts matter more than the points.
   }
 "dateEvents": array of objects {"date": string or null (YYYY-MM-DD if determinable), "dayText": string or null, "timeText": string or null, "venue": string or null, "activity": string or null, "status": "proposed" or "agreed" or "happened" or "cancelled", "proposedBy": "she" or "me" or null} — every meeting between them the chat discusses. Only where a day, a place or a specific activity is named; never from vague talk of meeting sometime.
 "summary": string — two or three sentences addressed to him on where the whole conversation stands: tone, momentum, anything agreed or left open. Second person throughout.
@@ -1097,7 +1097,27 @@ function loadImageEl(file) {
 const PANEL_MAX_ASPECT = 1.3;     // height / width per panel
 const PANEL_OVERLAP = 0.06;       // fraction of panel height repeated
 const PANEL_WIDTH_CAP = 1100;     // px sent to the API — legible, and a third of the memory of 1400
-const MAX_PANELS = 14;
+// Sections of four are read separately now, so a tall screenshot no longer has
+// to fit one request. 24 panels covers roughly a 31:1 image.
+const MAX_PANELS = 24;
+
+// What this image is going to cost in quality, before we spend anything on it.
+function assessScreenshot(imgEl) {
+  const W = imgEl.naturalWidth, H = imgEl.naturalHeight;
+  const aspect = H / W;
+  const maxAspect = PANEL_MAX_ASPECT * MAX_PANELS;      // beyond this, panels get squeezed
+  const problems = [];
+  if (aspect > maxAspect) {
+    problems.push('This image is ' + aspect.toFixed(0) + ' times taller than it is wide. Past about '
+      + Math.round(maxAspect) + ':1 the slices get squeezed and text starts to be missed — split it into '
+      + Math.ceil(aspect / maxAspect + 0.5) + ' shorter screenshots.');
+  }
+  if (W < 400) {
+    problems.push('At only ' + W + 'px wide there is very little detail in the text. Capture at full phone resolution '
+      + 'rather than saving a shared or compressed copy.');
+  }
+  return { width: W, height: H, aspect, problems };
+}
 
 function sliceImageToPanels(imgEl) {
   const W = imgEl.naturalWidth, H = imgEl.naturalHeight;
@@ -1320,6 +1340,8 @@ function nameSimilarity(a, b) {
 async function extractChatPayload(files, onProgress) {
   let sessions = [], summaryParts = [], phoneNumbers = [], markers = [], dateEvents = [];
   let contactName = null, matchedDate = null, appName = null, lowConfidence = false, threadStart = false;
+  let failedSections = [];
+  const imageWarnings = [];
   let n = 0;
   for (const file of files) {
     n += 1;
@@ -1328,7 +1350,7 @@ async function extractChatPayload(files, onProgress) {
     const dated = CONVERSATION_EXTRACT_PROMPT + '\n\nToday is '
       + today.toLocaleDateString('en-IE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
       + ' (' + TODAY() + '). Resolve every divider against that.';
-    const fields = await extractFromScreenshot(file, dated, 8000, mergeChatResults, onProgress);
+    const fields = await extractFromScreenshot(file, dated, 8000, mergeChatResults, onProgress, w => imageWarnings.push(w));
     if (fields.summary) summaryParts.push(fields.summary);
     if (Array.isArray(fields.sessions)) sessions = sessions.concat(fields.sessions);
     if (Array.isArray(fields.phoneNumbers)) phoneNumbers = phoneNumbers.concat(fields.phoneNumbers);
@@ -1338,11 +1360,14 @@ async function extractChatPayload(files, onProgress) {
     if (!matchedDate && fields.matchedDate) matchedDate = String(fields.matchedDate).trim();
     if (!appName && fields.appName) appName = String(fields.appName).trim();
     if (fields.attributionConfidence === 'low') lowConfidence = true;
+    if (fields.threadStart === true) threadStart = true;
+    if (Array.isArray(fields.failedSections)) failedSections = failedSections.concat(fields.failedSections);
   }
   const totalPoints = sessions.reduce((sum, ses) => sum + ((ses && ses.points) || []).length, 0);
   return {
     sessions: sessions.filter(Boolean),
     summary: summaryParts.join(' '), phoneNumbers, contactName, matchedDate, appName, dateEvents, threadStart,
+    failedSections, imageWarnings,
     markers: Array.from(new Set(markers.filter(Boolean))),
     lowConfidence,
     totalPoints,
@@ -1604,15 +1629,40 @@ async function callVision(contentBlocks, maxTokens) {
 // salvage the fields that did arrive.
 function parseLooseJson(text) {
   if (!text) return null;
-  try { return JSON.parse(text); } catch (e) { /* try to repair */ }
-  let t = text.trim().replace(/,\s*$/, '');
+  try { return JSON.parse(text); } catch (e) { /* fall through to repair */ }
+
+  // Walk the text tracking strings and open brackets, then close everything that
+  // is still open. Recovers a reply cut off anywhere, however deeply nested.
+  let inString = false, escaped = false;
+  const stack = [];
+  let lastSafe = -1;                       // last index at a clean value boundary
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') { inString = false; lastSafe = i; }
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === '{' || c === '[') stack.push(c === '{' ? '}' : ']');
+    else if (c === '}' || c === ']') { stack.pop(); lastSafe = i; }
+    else if (c === ',' ) lastSafe = i - 1;
+    else if (/[0-9truefalsn]/.test(c)) lastSafe = i;
+  }
+
   const attempts = [];
-  const quotes = (t.match(/(?:^|[^\\])"/g) || []).length;
-  if (quotes % 2 === 1) t += '"';
-  attempts.push(t + '}');
-  attempts.push(t.replace(/,?\s*"[^"]*"\s*:\s*[^,}]*$/, '') + '}');
-  attempts.push(t + ']}');
-  attempts.push(t.replace(/,?\s*"[^"]*"?\s*$/, '') + '}');
+  const close = stack.slice().reverse().join('');
+  if (inString) attempts.push(text + '"' + close);
+  attempts.push(text + close);
+  // Drop a dangling partial value, then close.
+  if (lastSafe > 0) {
+    const trimmed = text.slice(0, lastSafe + 1).replace(/,\s*$/, '');
+    attempts.push(trimmed + close);
+    attempts.push(trimmed + (inString ? '"' : '') + close);
+  }
+  attempts.push(text.replace(/,?\s*"[^"]*"?\s*:?[^,}\]]*$/, '') + close);
+
   for (const a of attempts) {
     try {
       const v = JSON.parse(a);
@@ -1644,30 +1694,49 @@ function panelBlocks(panels, total, prompt) {
 // One call with every panel is best — the model sees the whole profile at once.
 // If that fails (too many images, a truncated reply, a transient API error) fall
 // back to reading three panels at a time and stitching the answers together.
+const PANELS_PER_CHUNK = 4;
+const SINGLE_PASS_LIMIT = 5;   // above this, go straight to sections
+
 async function extractFromPanels(panels, prompt, maxTokens, merge, onProgress) {
   const total = panels.length;
-  try {
-    return await callVision(panelBlocks(panels, total, prompt), maxTokens || 4000);
-  } catch (err) {
-    if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY') throw err;
-    if (total <= 3) {
-      if (err.partial) return err.partial;   // better than nothing on a single-panel read
-      throw err;
+
+  // One call is best when the whole thing fits: the model sees the full context.
+  if (total <= SINGLE_PASS_LIMIT) {
+    try {
+      return await callVision(panelBlocks(panels, total, prompt), maxTokens || 4000);
+    } catch (err) {
+      if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY' || total <= 2) {
+        if (err.partial) return err.partial;
+        throw err;
+      }
+      if (onProgress) onProgress('First pass failed — rereading in sections…');
     }
-    if (onProgress) onProgress('First pass failed — rereading in sections…');
-    const chunks = [];
-    for (let i = 0; i < total; i += 3) chunks.push(panels.slice(i, i + 3));
-    const results = [];
-    let lastErr = null;
-    for (let i = 0; i < chunks.length; i++) {
-      if (onProgress) onProgress(`Reading section ${i + 1} of ${chunks.length}…`);
-      try {
-        results.push(await callVision(panelBlocks(chunks[i], total, prompt), maxTokens || 4000));
-      } catch (e) { lastErr = e; }
-    }
-    if (!results.length) throw lastErr || err;
-    return merge ? merge(results) : results[0];
   }
+
+  // Long screenshots are read in sections. Each section is small enough to come
+  // back complete, and one bad section no longer costs the whole read.
+  const chunks = [];
+  for (let i = 0; i < total; i += PANELS_PER_CHUNK) chunks.push(panels.slice(i, i + PANELS_PER_CHUNK));
+  const results = [];
+  const failures = [];
+  for (let i = 0; i < chunks.length; i++) {
+    if (onProgress) onProgress('Reading section ' + (i + 1) + ' of ' + chunks.length + '…');
+    try {
+      results.push(await callVision(panelBlocks(chunks[i], total, prompt), maxTokens || 4000));
+    } catch (e) {
+      if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+      if (e.partial) { results.push(e.partial); }        // a truncated section still has content
+      else failures.push(i + 1);
+    }
+  }
+  if (!results.length) {
+    const err = wrapApiError('None of the ' + chunks.length + ' sections could be read.');
+    err.code = 'ALL_SECTIONS_FAILED';
+    throw err;
+  }
+  const merged = merge ? merge(results) : results[0];
+  if (failures.length) merged.failedSections = failures;
+  return merged;
 }
 
 function mergeProfileResults(results) {
@@ -1686,13 +1755,38 @@ function mergeProfileResults(results) {
 }
 
 function mergeChatResults(results) {
-  const out = { points: [], phoneNumbers: [], relativeDayMarkers: [], summary: '' };
-  results.forEach(r => {
+  const out = {
+    sessions: [], phoneNumbers: [], relativeDayMarkers: [], dateEvents: [],
+    summary: '', threadStart: false, attributionConfidence: 'high',
+  };
+  const byDate = {};
+  results.forEach((r, chunkIndex) => {
     if (!r) return;
-    if (Array.isArray(r.points)) out.points = out.points.concat(r.points);
+    (Array.isArray(r.sessions) ? r.sessions : []).forEach(ses => {
+      if (!ses) return;
+      // Sessions split across a panel boundary arrive twice; fold them together.
+      const key = ses.date || ses.dayLabel || ('chunk-' + chunkIndex + '-' + out.sessions.length);
+      if (byDate[key]) {
+        const prev = byDate[key];
+        if (ses.summary && !normaliseMsg(prev.summary || '').includes(normaliseMsg(ses.summary).slice(0, 40))) {
+          prev.summary = ((prev.summary || '') + ' ' + ses.summary).trim();
+        }
+        prev.facts = [...(prev.facts || []), ...(ses.facts || [])];
+        prev.points = [...(prev.points || []), ...(ses.points || [])];
+      } else {
+        byDate[key] = { ...ses, facts: [...(ses.facts || [])], points: [...(ses.points || [])] };
+        out.sessions.push(byDate[key]);
+      }
+    });
     if (Array.isArray(r.phoneNumbers)) out.phoneNumbers = out.phoneNumbers.concat(r.phoneNumbers);
     if (Array.isArray(r.relativeDayMarkers)) out.relativeDayMarkers = out.relativeDayMarkers.concat(r.relativeDayMarkers);
-    if (r.summary) out.summary = (out.summary + ' ' + r.summary).trim();
+    if (Array.isArray(r.dateEvents)) out.dateEvents = out.dateEvents.concat(r.dateEvents);
+    // Sections often describe the same overall arc; don't repeat it.
+    if (r.summary && !normaliseMsg(out.summary).includes(normaliseMsg(r.summary).slice(0, 40))) {
+      out.summary = (out.summary + ' ' + r.summary).trim();
+    }
+    if (chunkIndex === 0 && r.threadStart === true) out.threadStart = true;
+    if (r.attributionConfidence === 'low') out.attributionConfidence = 'low';
     ['contactName', 'appName', 'matchedDate'].forEach(k => { if (!out[k] && r[k]) out[k] = r[k]; });
   });
   return out;
@@ -1700,9 +1794,10 @@ function mergeChatResults(results) {
 
 // Single-image extraction (chat screenshots, date plans) — still panel-sliced so
 // long conversations stay legible.
-async function extractFromScreenshot(file, prompt, maxTokens, merge, onProgress) {
+async function extractFromScreenshot(file, prompt, maxTokens, merge, onProgress, onWarn) {
   requireApiKey();
   const imgEl = await loadImageEl(file);
+  if (onWarn) assessScreenshot(imgEl).problems.forEach(onWarn);
   const panels = sliceImageToPanels(imgEl);
   try {
     return await extractFromPanels(panels, prompt, maxTokens, merge, onProgress);
@@ -2053,6 +2148,233 @@ function StatusPanel({ read, busy, error, onRefresh, onOpenSettings }) {
   );
 }
 
+// ---------- App lock ----------
+// A gate, not encryption: it stops someone who picks up your unlocked phone from
+// reading this. The data underneath stays as it was, so there is no way to lock
+// yourself out of it permanently.
+
+const Lock = {
+  saltKey: 'rt:lock-salt',
+  hashKey: 'rt:lock-hash',
+  credKey: 'rt:lock-cred',
+  graceKey: 'rt:lock-seen',
+
+  enabled() { return !!Local.get(this.hashKey); },
+  hasBiometric() { return !!Local.get(this.credKey); },
+
+  async derive(passcode, saltB64) {
+    const enc = new TextEncoder();
+    const salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey('raw', enc.encode(passcode), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, key, 256);
+    return btoa(String.fromCharCode(...new Uint8Array(bits)));
+  },
+
+  async set(passcode) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const saltB64 = btoa(String.fromCharCode(...salt));
+    const hash = await this.derive(passcode, saltB64);
+    Local.set(this.saltKey, saltB64);
+    Local.set(this.hashKey, hash);
+    return true;
+  },
+
+  async check(passcode) {
+    const salt = Local.get(this.saltKey), hash = Local.get(this.hashKey);
+    if (!salt || !hash) return false;
+    try { return (await this.derive(passcode, salt)) === hash; } catch (e) { return false; }
+  },
+
+  clear() {
+    Local.remove(this.saltKey);
+    Local.remove(this.hashKey);
+    Local.remove(this.credKey);
+  },
+
+  biometricAvailable() {
+    return typeof window !== 'undefined' && window.PublicKeyCredential && window.isSecureContext;
+  },
+
+  // Register this device's own unlock — Face ID, fingerprint, Windows Hello.
+  async registerBiometric(label) {
+    if (!this.biometricAvailable()) throw new Error('This browser or connection does not support device unlock.');
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const userId = crypto.getRandomValues(new Uint8Array(16));
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge,
+        rp: { name: 'Relationship Tracker', id: window.location.hostname },
+        user: { id: userId, name: label || 'me', displayName: label || 'me' },
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+        authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required' },
+        timeout: 60000,
+        attestation: 'none',
+      },
+    });
+    if (!cred) throw new Error('Device unlock was not set up.');
+    const rawId = btoa(String.fromCharCode(...new Uint8Array(cred.rawId)));
+    Local.set(this.credKey, rawId);
+    return true;
+  },
+
+  // The browser only hands back an assertion after it has verified you.
+  async verifyBiometric() {
+    const rawId = Local.get(this.credKey);
+    if (!rawId) return false;
+    const id = Uint8Array.from(atob(rawId), c => c.charCodeAt(0));
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        allowCredentials: [{ id, type: 'public-key' }],
+        userVerification: 'required',
+        timeout: 60000,
+      },
+    });
+    return !!assertion;
+  },
+};
+
+function LockScreen({ onUnlock }) {
+  const [code, setCode] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const canBio = Lock.hasBiometric() && Lock.biometricAvailable();
+
+  async function tryBiometric() {
+    setErr('');
+    setBusy(true);
+    try {
+      if (await Lock.verifyBiometric()) onUnlock();
+      else setErr('Device unlock did not complete.');
+    } catch (e) {
+      setErr('Device unlock failed — use your passcode.');
+    }
+    setBusy(false);
+  }
+
+  async function tryCode() {
+    setBusy(true);
+    setErr('');
+    if (await Lock.check(code)) onUnlock();
+    else { setErr('Wrong passcode.'); setCode(''); }
+    setBusy(false);
+  }
+
+  useEffect(() => { if (canBio) tryBiometric(); }, []);
+
+  return (
+    <div className="min-h-screen bg-stone-100 flex items-center justify-center p-6">
+      <div className="w-full max-w-xs text-center">
+        <h1 className="font-serif text-2xl mb-1">Locked</h1>
+        <p className="text-sm text-stone-500 mb-6">Unlock to see your tracker.</p>
+
+        {canBio && (
+          <button onClick={tryBiometric} disabled={busy}
+            className="w-full bg-stone-900 text-white rounded-md py-2.5 text-sm font-medium mb-3 disabled:opacity-60">
+            {busy ? 'Waiting…' : 'Unlock with this device'}
+          </button>
+        )}
+
+        <input
+          type="password" inputMode="text" value={code} autoFocus={!canBio}
+          onChange={e => setCode(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') tryCode(); }}
+          placeholder="Passcode"
+          className="w-full border border-stone-300 rounded-md px-3 py-2.5 text-sm text-center focus:outline-none focus:ring-2 focus:ring-stone-900"
+        />
+        <button onClick={tryCode} disabled={busy || !code}
+          className="mt-2 w-full border border-stone-300 rounded-md py-2.5 text-sm font-medium hover:bg-stone-50 disabled:opacity-50">
+          Unlock
+        </button>
+        {err && <p className="text-xs text-red-700 mt-3">{err}</p>}
+      </div>
+    </div>
+  );
+}
+
+function LockPanel({ onChanged }) {
+  const [code, setCode] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const enabled = Lock.enabled();
+  const bio = Lock.hasBiometric();
+  const inputCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900";
+
+  async function save() {
+    setErr(''); setMsg('');
+    if (code.length < 6) { setErr('Use at least 6 characters.'); return; }
+    if (code !== confirm) { setErr('The two entries do not match.'); return; }
+    await Lock.set(code);
+    setCode(''); setConfirm('');
+    setMsg('Passcode set. It applies on this device.');
+    if (onChanged) onChanged();
+  }
+
+  async function addBiometric() {
+    setErr(''); setMsg('');
+    try {
+      await Lock.registerBiometric('tracker');
+      setMsg('Device unlock enabled — Face ID, fingerprint or Windows Hello.');
+      if (onChanged) onChanged();
+    } catch (e) {
+      setErr(String(e.message || e));
+    }
+  }
+
+  function turnOff() {
+    Lock.clear();
+    setMsg('Lock turned off on this device.');
+    if (onChanged) onChanged();
+  }
+
+  return (
+    <div className="mt-6 pt-4 border-t border-stone-200">
+      <h4 className="text-sm font-semibold text-stone-700 mb-1">Lock this app</h4>
+      <p className="text-xs text-stone-500 mb-2">
+        Asks for a passcode or your device unlock when the app opens, and again after it has been in the background
+        for five minutes. Set per device. This is a gate on the screen, not encryption — your data is never at risk
+        of being locked away from you.
+      </p>
+
+      {enabled ? (
+        <>
+          <p className="text-sm text-stone-700">
+            Lock is on{bio ? ', with device unlock' : ', passcode only'}.
+          </p>
+          <div className="flex gap-2 mt-2">
+            {!bio && Lock.biometricAvailable() && (
+              <button onClick={addBiometric}
+                className="flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
+                Add device unlock
+              </button>
+            )}
+            <button onClick={turnOff}
+              className="flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
+              Turn lock off
+            </button>
+          </div>
+          <p className="text-xs text-stone-400 mt-2">Change the passcode by entering a new one below.</p>
+        </>
+      ) : null}
+
+      <div className="mt-2 space-y-2">
+        <input type="password" value={code} onChange={e => setCode(e.target.value)}
+          placeholder={enabled ? 'New passcode' : 'Passcode (6+ characters)'} className={inputCls} />
+        <input type="password" value={confirm} onChange={e => setConfirm(e.target.value)}
+          placeholder="Repeat it" className={inputCls} />
+        <button onClick={save} disabled={!code || !confirm}
+          className="w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800 disabled:opacity-50">
+          {enabled ? 'Change passcode' : 'Turn lock on'}
+        </button>
+      </div>
+      {msg && <p className="text-xs text-emerald-700 mt-2">{msg}</p>}
+      {err && <p className="text-xs text-red-700 mt-2">{err}</p>}
+    </div>
+  );
+}
+
 // ---------- Crash guard ----------
 // A thrown render error would otherwise leave a blank white screen with no clue
 // what happened. Catch it, show it, and let the app be restarted without losing
@@ -2122,6 +2444,9 @@ function RelationshipTracker() {
   const [dateConfirm, setDateConfirm] = useState(null);
   const [backupNag, setBackupNag] = useState(false);
   const [exportStamp, setExportStamp] = useState('');
+  const [locked, setLocked] = useState(() => Lock.enabled());
+  const hiddenAt = React.useRef(null);
+  const [lockVersion, setLockVersion] = useState(0);
   const [syncState, setSyncState] = useState({ status: Sync.configured() ? 'idle' : 'off', last: Sync.lastPull(), error: '' });
   const [syncConflict, setSyncConflict] = useState(null);
   const pushTimer = React.useRef(null);
@@ -2134,6 +2459,17 @@ function RelationshipTracker() {
   const [dateForm, setDateForm] = useState(emptyDateForm);
 
   useEffect(() => { load().then(() => { if (Sync.configured()) pullFromCloud(true); }); }, []);
+
+  // Re-lock after five minutes in the background, not on every glance away.
+  useEffect(() => {
+    function onVisibility() {
+      if (document.hidden) { hiddenAt.current = Date.now(); return; }
+      if (Lock.enabled() && hiddenAt.current && Date.now() - hiddenAt.current > 5 * 60 * 1000) setLocked(true);
+      hiddenAt.current = null;
+    }
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -2507,9 +2843,15 @@ function RelationshipTracker() {
     const { days, addedFacts, addedPoints, dropped } = mergeSessions(target.conversationDays, incoming, knownKeys);
 
     if (!addedPoints && !addedFacts) {
-      setError(dropped
+      const why = dropped
         ? 'Everything in that screenshot was already logged for ' + target.name + ' — nothing new added.'
-        : 'Nothing could be read from that screenshot.');
+        : !payload.sessions.length
+          ? 'No conversation could be read from that image. If the text is very small, try splitting the screenshot into two or three shorter ones.'
+          : 'The image was read but nothing worth logging came out of it — it may be all small talk.';
+      setError(why
+        + (payload.imageWarnings && payload.imageWarnings.length ? ' ' + payload.imageWarnings.join(' ') : '')
+        + (payload.failedSections && payload.failedSections.length
+          ? ' Sections ' + payload.failedSections.join(', ') + ' failed to read.' : ''));
       return { added: 0, dropped };
     }
 
@@ -2544,7 +2886,11 @@ function RelationshipTracker() {
     setNotice(addedPoints + ' line' + (addedPoints === 1 ? '' : 's') + ' and ' + addedFacts + ' fact'
       + (addedFacts === 1 ? '' : 's') + ' added to ' + target.name
       + (dropped ? ', ' + dropped + ' duplicate' + (dropped === 1 ? '' : 's') + ' skipped' : '') + '.'
-      + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : '') + matchNote);
+      + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : '')
+      + (payload.imageWarnings && payload.imageWarnings.length ? ' ' + payload.imageWarnings[0] : '')
+      + (payload.failedSections && payload.failedSections.length
+        ? ' Note: ' + payload.failedSections.length + ' section(s) of the image could not be read, so some of the conversation may be missing.' : '')
+      + matchNote);
     return { added: addedPoints, dropped };
   }
 
@@ -2694,6 +3040,8 @@ function RelationshipTracker() {
   }, [people]);
 
   // ---------- Detail (single person) view ----------
+  if (locked) return <LockScreen onUnlock={() => setLocked(false)} />;
+
   if (selected) {
     const labels = dateLabelsForPerson(selected);
     const sortedDates = [...(selected.dates || [])].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -3007,6 +3355,8 @@ function RelationshipTracker() {
             onDisconnectSync={disconnectSync}
             onSyncNow={() => pullFromCloud(false)}
             onExported={(d) => { setExportStamp(d); setBackupNag(false); }}
+            onLockChanged={() => setLockVersion(v => v + 1)}
+            lockVersion={lockVersion}
           />
         )}
         {error && <ErrorToast message={error} />}
@@ -3268,6 +3618,8 @@ function RelationshipTracker() {
           onDisconnectSync={disconnectSync}
           onSyncNow={() => pullFromCloud(false)}
           onExported={(d) => { setExportStamp(d); setBackupNag(false); }}
+          onLockChanged={() => setLockVersion(v => v + 1)}
+          lockVersion={lockVersion}
         />
       )}
     </div>
@@ -4977,7 +5329,7 @@ function InsightsModal({ people, onClose }) {
 
 // ---------- Settings (API key, export/import for backup or moving between devices) ----------
 
-function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync, onDisconnectSync, onSyncNow, onExported }) {
+function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync, onDisconnectSync, onSyncNow, onExported, onLockChanged, lockVersion }) {
   const [apiKey, setApiKey] = useState(() => Local.get('anthropic-api-key') || '');
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -5083,6 +5435,7 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
             </div>
             {importErr && <p className="text-xs text-red-700 mt-2">{importErr}</p>}
             <p className="text-[11px] text-stone-400 mt-3">Build {BUILD_STAMP}</p>
+            <LockPanel key={lockVersion} onChanged={onLockChanged} />
             <SyncPanel
               syncState={syncState}
               onConnect={onConnectSync}
@@ -5375,7 +5728,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-02 20:47';
+const BUILD_STAMP = '2026-08-03 15:13';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -6121,7 +6474,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
     "date": string or null (YYYY-MM-DD. RESOLVE THE DIVIDER — see the dating rules below. Null only if this session has no day information of any kind above it.),
     "summary": string — two or three sentences addressed to him on what this session was about and how it went between you and her. Second person throughout. Not a transcript.
     "facts": array of short strings — the things worth remembering: what she revealed about her life, work, family, plans or opinions; anything agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, "how was your day", compliments and other small talk. Empty array if the session was pure small talk.
-    "points": array of {"from": "she" or "me", "point": string, "timeLabel": string or null} — the underlying chronology, one condensed line per meaningful exchange of about 8-15 words, in order. This is the detail behind the summary.
+    "points": array of {"from": "she" or "me", "point": string, "timeLabel": string or null} — the underlying chronology, one condensed line per meaningful exchange of about 8-15 words, in order. AT MOST 8 PER SESSION: if the day ran longer than that, keep the 8 that matter and let the summary and facts carry the rest. Never let this array make your reply so long that it gets cut off — the summary and facts matter more than the points.
   }
 "dateEvents": array of objects {"date": string or null (YYYY-MM-DD if determinable), "dayText": string or null, "timeText": string or null, "venue": string or null, "activity": string or null, "status": "proposed" or "agreed" or "happened" or "cancelled", "proposedBy": "she" or "me" or null} — every meeting between them the chat discusses. Only where a day, a place or a specific activity is named; never from vague talk of meeting sometime.
 "summary": string — two or three sentences addressed to him on where the whole conversation stands: tone, momentum, anything agreed or left open. Second person throughout.
@@ -6153,7 +6506,30 @@ function loadImageEl(file) {
 const PANEL_MAX_ASPECT = 1.3; // height / width per panel
 const PANEL_OVERLAP = 0.06; // fraction of panel height repeated
 const PANEL_WIDTH_CAP = 1100; // px sent to the API — legible, and a third of the memory of 1400
-const MAX_PANELS = 14;
+// Sections of four are read separately now, so a tall screenshot no longer has
+// to fit one request. 24 panels covers roughly a 31:1 image.
+const MAX_PANELS = 24;
+
+// What this image is going to cost in quality, before we spend anything on it.
+function assessScreenshot(imgEl) {
+  const W = imgEl.naturalWidth,
+    H = imgEl.naturalHeight;
+  const aspect = H / W;
+  const maxAspect = PANEL_MAX_ASPECT * MAX_PANELS; // beyond this, panels get squeezed
+  const problems = [];
+  if (aspect > maxAspect) {
+    problems.push('This image is ' + aspect.toFixed(0) + ' times taller than it is wide. Past about ' + Math.round(maxAspect) + ':1 the slices get squeezed and text starts to be missed — split it into ' + Math.ceil(aspect / maxAspect + 0.5) + ' shorter screenshots.');
+  }
+  if (W < 400) {
+    problems.push('At only ' + W + 'px wide there is very little detail in the text. Capture at full phone resolution ' + 'rather than saving a shared or compressed copy.');
+  }
+  return {
+    width: W,
+    height: H,
+    aspect,
+    problems
+  };
+}
 function sliceImageToPanels(imgEl) {
   const W = imgEl.naturalWidth,
     H = imgEl.naturalHeight;
@@ -6406,6 +6782,8 @@ async function extractChatPayload(files, onProgress) {
     appName = null,
     lowConfidence = false,
     threadStart = false;
+  let failedSections = [];
+  const imageWarnings = [];
   let n = 0;
   for (const file of files) {
     n += 1;
@@ -6417,7 +6795,7 @@ async function extractChatPayload(files, onProgress) {
       month: 'long',
       year: 'numeric'
     }) + ' (' + TODAY() + '). Resolve every divider against that.';
-    const fields = await extractFromScreenshot(file, dated, 8000, mergeChatResults, onProgress);
+    const fields = await extractFromScreenshot(file, dated, 8000, mergeChatResults, onProgress, w => imageWarnings.push(w));
     if (fields.summary) summaryParts.push(fields.summary);
     if (Array.isArray(fields.sessions)) sessions = sessions.concat(fields.sessions);
     if (Array.isArray(fields.phoneNumbers)) phoneNumbers = phoneNumbers.concat(fields.phoneNumbers);
@@ -6427,6 +6805,8 @@ async function extractChatPayload(files, onProgress) {
     if (!matchedDate && fields.matchedDate) matchedDate = String(fields.matchedDate).trim();
     if (!appName && fields.appName) appName = String(fields.appName).trim();
     if (fields.attributionConfidence === 'low') lowConfidence = true;
+    if (fields.threadStart === true) threadStart = true;
+    if (Array.isArray(fields.failedSections)) failedSections = failedSections.concat(fields.failedSections);
   }
   const totalPoints = sessions.reduce((sum, ses) => sum + (ses && ses.points || []).length, 0);
   return {
@@ -6438,6 +6818,8 @@ async function extractChatPayload(files, onProgress) {
     appName,
     dateEvents,
     threadStart,
+    failedSections,
+    imageWarnings,
     markers: Array.from(new Set(markers.filter(Boolean))),
     lowConfidence,
     totalPoints,
@@ -6742,15 +7124,43 @@ function parseLooseJson(text) {
   if (!text) return null;
   try {
     return JSON.parse(text);
-  } catch (e) {/* try to repair */}
-  let t = text.trim().replace(/,\s*$/, '');
+  } catch (e) {/* fall through to repair */}
+
+  // Walk the text tracking strings and open brackets, then close everything that
+  // is still open. Recovers a reply cut off anywhere, however deeply nested.
+  let inString = false,
+    escaped = false;
+  const stack = [];
+  let lastSafe = -1; // last index at a clean value boundary
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) escaped = false;else if (c === '\\') escaped = true;else if (c === '"') {
+        inString = false;
+        lastSafe = i;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === '{' || c === '[') stack.push(c === '{' ? '}' : ']');else if (c === '}' || c === ']') {
+      stack.pop();
+      lastSafe = i;
+    } else if (c === ',') lastSafe = i - 1;else if (/[0-9truefalsn]/.test(c)) lastSafe = i;
+  }
   const attempts = [];
-  const quotes = (t.match(/(?:^|[^\\])"/g) || []).length;
-  if (quotes % 2 === 1) t += '"';
-  attempts.push(t + '}');
-  attempts.push(t.replace(/,?\s*"[^"]*"\s*:\s*[^,}]*$/, '') + '}');
-  attempts.push(t + ']}');
-  attempts.push(t.replace(/,?\s*"[^"]*"?\s*$/, '') + '}');
+  const close = stack.slice().reverse().join('');
+  if (inString) attempts.push(text + '"' + close);
+  attempts.push(text + close);
+  // Drop a dangling partial value, then close.
+  if (lastSafe > 0) {
+    const trimmed = text.slice(0, lastSafe + 1).replace(/,\s*$/, '');
+    attempts.push(trimmed + close);
+    attempts.push(trimmed + (inString ? '"' : '') + close);
+  }
+  attempts.push(text.replace(/,?\s*"[^"]*"?\s*:?[^,}\]]*$/, '') + close);
   for (const a of attempts) {
     try {
       const v = JSON.parse(a);
@@ -6796,32 +7206,51 @@ function panelBlocks(panels, total, prompt) {
 // One call with every panel is best — the model sees the whole profile at once.
 // If that fails (too many images, a truncated reply, a transient API error) fall
 // back to reading three panels at a time and stitching the answers together.
+const PANELS_PER_CHUNK = 4;
+const SINGLE_PASS_LIMIT = 5; // above this, go straight to sections
+
 async function extractFromPanels(panels, prompt, maxTokens, merge, onProgress) {
   const total = panels.length;
-  try {
-    return await callVision(panelBlocks(panels, total, prompt), maxTokens || 4000);
-  } catch (err) {
-    if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY') throw err;
-    if (total <= 3) {
-      if (err.partial) return err.partial; // better than nothing on a single-panel read
-      throw err;
-    }
-    if (onProgress) onProgress('First pass failed — rereading in sections…');
-    const chunks = [];
-    for (let i = 0; i < total; i += 3) chunks.push(panels.slice(i, i + 3));
-    const results = [];
-    let lastErr = null;
-    for (let i = 0; i < chunks.length; i++) {
-      if (onProgress) onProgress(`Reading section ${i + 1} of ${chunks.length}…`);
-      try {
-        results.push(await callVision(panelBlocks(chunks[i], total, prompt), maxTokens || 4000));
-      } catch (e) {
-        lastErr = e;
+
+  // One call is best when the whole thing fits: the model sees the full context.
+  if (total <= SINGLE_PASS_LIMIT) {
+    try {
+      return await callVision(panelBlocks(panels, total, prompt), maxTokens || 4000);
+    } catch (err) {
+      if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY' || total <= 2) {
+        if (err.partial) return err.partial;
+        throw err;
       }
+      if (onProgress) onProgress('First pass failed — rereading in sections…');
     }
-    if (!results.length) throw lastErr || err;
-    return merge ? merge(results) : results[0];
   }
+
+  // Long screenshots are read in sections. Each section is small enough to come
+  // back complete, and one bad section no longer costs the whole read.
+  const chunks = [];
+  for (let i = 0; i < total; i += PANELS_PER_CHUNK) chunks.push(panels.slice(i, i + PANELS_PER_CHUNK));
+  const results = [];
+  const failures = [];
+  for (let i = 0; i < chunks.length; i++) {
+    if (onProgress) onProgress('Reading section ' + (i + 1) + ' of ' + chunks.length + '…');
+    try {
+      results.push(await callVision(panelBlocks(chunks[i], total, prompt), maxTokens || 4000));
+    } catch (e) {
+      if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+      if (e.partial) {
+        results.push(e.partial);
+      } // a truncated section still has content
+      else failures.push(i + 1);
+    }
+  }
+  if (!results.length) {
+    const err = wrapApiError('None of the ' + chunks.length + ' sections could be read.');
+    err.code = 'ALL_SECTIONS_FAILED';
+    throw err;
+  }
+  const merged = merge ? merge(results) : results[0];
+  if (failures.length) merged.failedSections = failures;
+  return merged;
 }
 function mergeProfileResults(results) {
   const out = {
@@ -6840,17 +7269,46 @@ function mergeProfileResults(results) {
 }
 function mergeChatResults(results) {
   const out = {
-    points: [],
+    sessions: [],
     phoneNumbers: [],
     relativeDayMarkers: [],
-    summary: ''
+    dateEvents: [],
+    summary: '',
+    threadStart: false,
+    attributionConfidence: 'high'
   };
-  results.forEach(r => {
+  const byDate = {};
+  results.forEach((r, chunkIndex) => {
     if (!r) return;
-    if (Array.isArray(r.points)) out.points = out.points.concat(r.points);
+    (Array.isArray(r.sessions) ? r.sessions : []).forEach(ses => {
+      if (!ses) return;
+      // Sessions split across a panel boundary arrive twice; fold them together.
+      const key = ses.date || ses.dayLabel || 'chunk-' + chunkIndex + '-' + out.sessions.length;
+      if (byDate[key]) {
+        const prev = byDate[key];
+        if (ses.summary && !normaliseMsg(prev.summary || '').includes(normaliseMsg(ses.summary).slice(0, 40))) {
+          prev.summary = ((prev.summary || '') + ' ' + ses.summary).trim();
+        }
+        prev.facts = [...(prev.facts || []), ...(ses.facts || [])];
+        prev.points = [...(prev.points || []), ...(ses.points || [])];
+      } else {
+        byDate[key] = {
+          ...ses,
+          facts: [...(ses.facts || [])],
+          points: [...(ses.points || [])]
+        };
+        out.sessions.push(byDate[key]);
+      }
+    });
     if (Array.isArray(r.phoneNumbers)) out.phoneNumbers = out.phoneNumbers.concat(r.phoneNumbers);
     if (Array.isArray(r.relativeDayMarkers)) out.relativeDayMarkers = out.relativeDayMarkers.concat(r.relativeDayMarkers);
-    if (r.summary) out.summary = (out.summary + ' ' + r.summary).trim();
+    if (Array.isArray(r.dateEvents)) out.dateEvents = out.dateEvents.concat(r.dateEvents);
+    // Sections often describe the same overall arc; don't repeat it.
+    if (r.summary && !normaliseMsg(out.summary).includes(normaliseMsg(r.summary).slice(0, 40))) {
+      out.summary = (out.summary + ' ' + r.summary).trim();
+    }
+    if (chunkIndex === 0 && r.threadStart === true) out.threadStart = true;
+    if (r.attributionConfidence === 'low') out.attributionConfidence = 'low';
     ['contactName', 'appName', 'matchedDate'].forEach(k => {
       if (!out[k] && r[k]) out[k] = r[k];
     });
@@ -6860,9 +7318,10 @@ function mergeChatResults(results) {
 
 // Single-image extraction (chat screenshots, date plans) — still panel-sliced so
 // long conversations stay legible.
-async function extractFromScreenshot(file, prompt, maxTokens, merge, onProgress) {
+async function extractFromScreenshot(file, prompt, maxTokens, merge, onProgress, onWarn) {
   requireApiKey();
   const imgEl = await loadImageEl(file);
+  if (onWarn) assessScreenshot(imgEl).problems.forEach(onWarn);
   const panels = sliceImageToPanels(imgEl);
   try {
     return await extractFromPanels(panels, prompt, maxTokens, merge, onProgress);
@@ -7218,6 +7677,262 @@ function StatusPanel({
   }, "Read taken ", formatReadStamp(read.generatedAt), ".")));
 }
 
+// ---------- App lock ----------
+// A gate, not encryption: it stops someone who picks up your unlocked phone from
+// reading this. The data underneath stays as it was, so there is no way to lock
+// yourself out of it permanently.
+
+const Lock = {
+  saltKey: 'rt:lock-salt',
+  hashKey: 'rt:lock-hash',
+  credKey: 'rt:lock-cred',
+  graceKey: 'rt:lock-seen',
+  enabled() {
+    return !!Local.get(this.hashKey);
+  },
+  hasBiometric() {
+    return !!Local.get(this.credKey);
+  },
+  async derive(passcode, saltB64) {
+    const enc = new TextEncoder();
+    const salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey('raw', enc.encode(passcode), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({
+      name: 'PBKDF2',
+      salt,
+      iterations: 150000,
+      hash: 'SHA-256'
+    }, key, 256);
+    return btoa(String.fromCharCode(...new Uint8Array(bits)));
+  },
+  async set(passcode) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const saltB64 = btoa(String.fromCharCode(...salt));
+    const hash = await this.derive(passcode, saltB64);
+    Local.set(this.saltKey, saltB64);
+    Local.set(this.hashKey, hash);
+    return true;
+  },
+  async check(passcode) {
+    const salt = Local.get(this.saltKey),
+      hash = Local.get(this.hashKey);
+    if (!salt || !hash) return false;
+    try {
+      return (await this.derive(passcode, salt)) === hash;
+    } catch (e) {
+      return false;
+    }
+  },
+  clear() {
+    Local.remove(this.saltKey);
+    Local.remove(this.hashKey);
+    Local.remove(this.credKey);
+  },
+  biometricAvailable() {
+    return typeof window !== 'undefined' && window.PublicKeyCredential && window.isSecureContext;
+  },
+  // Register this device's own unlock — Face ID, fingerprint, Windows Hello.
+  async registerBiometric(label) {
+    if (!this.biometricAvailable()) throw new Error('This browser or connection does not support device unlock.');
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const userId = crypto.getRandomValues(new Uint8Array(16));
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge,
+        rp: {
+          name: 'Relationship Tracker',
+          id: window.location.hostname
+        },
+        user: {
+          id: userId,
+          name: label || 'me',
+          displayName: label || 'me'
+        },
+        pubKeyCredParams: [{
+          type: 'public-key',
+          alg: -7
+        }, {
+          type: 'public-key',
+          alg: -257
+        }],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          userVerification: 'required'
+        },
+        timeout: 60000,
+        attestation: 'none'
+      }
+    });
+    if (!cred) throw new Error('Device unlock was not set up.');
+    const rawId = btoa(String.fromCharCode(...new Uint8Array(cred.rawId)));
+    Local.set(this.credKey, rawId);
+    return true;
+  },
+  // The browser only hands back an assertion after it has verified you.
+  async verifyBiometric() {
+    const rawId = Local.get(this.credKey);
+    if (!rawId) return false;
+    const id = Uint8Array.from(atob(rawId), c => c.charCodeAt(0));
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        allowCredentials: [{
+          id,
+          type: 'public-key'
+        }],
+        userVerification: 'required',
+        timeout: 60000
+      }
+    });
+    return !!assertion;
+  }
+};
+function LockScreen({
+  onUnlock
+}) {
+  const [code, setCode] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const canBio = Lock.hasBiometric() && Lock.biometricAvailable();
+  async function tryBiometric() {
+    setErr('');
+    setBusy(true);
+    try {
+      if (await Lock.verifyBiometric()) onUnlock();else setErr('Device unlock did not complete.');
+    } catch (e) {
+      setErr('Device unlock failed — use your passcode.');
+    }
+    setBusy(false);
+  }
+  async function tryCode() {
+    setBusy(true);
+    setErr('');
+    if (await Lock.check(code)) onUnlock();else {
+      setErr('Wrong passcode.');
+      setCode('');
+    }
+    setBusy(false);
+  }
+  useEffect(() => {
+    if (canBio) tryBiometric();
+  }, []);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "min-h-screen bg-stone-100 flex items-center justify-center p-6"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "w-full max-w-xs text-center"
+  }, /*#__PURE__*/React.createElement("h1", {
+    className: "font-serif text-2xl mb-1"
+  }, "Locked"), /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-500 mb-6"
+  }, "Unlock to see your tracker."), canBio && /*#__PURE__*/React.createElement("button", {
+    onClick: tryBiometric,
+    disabled: busy,
+    className: "w-full bg-stone-900 text-white rounded-md py-2.5 text-sm font-medium mb-3 disabled:opacity-60"
+  }, busy ? 'Waiting…' : 'Unlock with this device'), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    inputMode: "text",
+    value: code,
+    autoFocus: !canBio,
+    onChange: e => setCode(e.target.value),
+    onKeyDown: e => {
+      if (e.key === 'Enter') tryCode();
+    },
+    placeholder: "Passcode",
+    className: "w-full border border-stone-300 rounded-md px-3 py-2.5 text-sm text-center focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: tryCode,
+    disabled: busy || !code,
+    className: "mt-2 w-full border border-stone-300 rounded-md py-2.5 text-sm font-medium hover:bg-stone-50 disabled:opacity-50"
+  }, "Unlock"), err && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-red-700 mt-3"
+  }, err)));
+}
+function LockPanel({
+  onChanged
+}) {
+  const [code, setCode] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const enabled = Lock.enabled();
+  const bio = Lock.hasBiometric();
+  const inputCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900";
+  async function save() {
+    setErr('');
+    setMsg('');
+    if (code.length < 6) {
+      setErr('Use at least 6 characters.');
+      return;
+    }
+    if (code !== confirm) {
+      setErr('The two entries do not match.');
+      return;
+    }
+    await Lock.set(code);
+    setCode('');
+    setConfirm('');
+    setMsg('Passcode set. It applies on this device.');
+    if (onChanged) onChanged();
+  }
+  async function addBiometric() {
+    setErr('');
+    setMsg('');
+    try {
+      await Lock.registerBiometric('tracker');
+      setMsg('Device unlock enabled — Face ID, fingerprint or Windows Hello.');
+      if (onChanged) onChanged();
+    } catch (e) {
+      setErr(String(e.message || e));
+    }
+  }
+  function turnOff() {
+    Lock.clear();
+    setMsg('Lock turned off on this device.');
+    if (onChanged) onChanged();
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    className: "mt-6 pt-4 border-t border-stone-200"
+  }, /*#__PURE__*/React.createElement("h4", {
+    className: "text-sm font-semibold text-stone-700 mb-1"
+  }, "Lock this app"), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-500 mb-2"
+  }, "Asks for a passcode or your device unlock when the app opens, and again after it has been in the background for five minutes. Set per device. This is a gate on the screen, not encryption — your data is never at risk of being locked away from you."), enabled ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-700"
+  }, "Lock is on", bio ? ', with device unlock' : ', passcode only', "."), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-2 mt-2"
+  }, !bio && Lock.biometricAvailable() && /*#__PURE__*/React.createElement("button", {
+    onClick: addBiometric,
+    className: "flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
+  }, "Add device unlock"), /*#__PURE__*/React.createElement("button", {
+    onClick: turnOff,
+    className: "flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
+  }, "Turn lock off")), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-400 mt-2"
+  }, "Change the passcode by entering a new one below.")) : null, /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 space-y-2"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    value: code,
+    onChange: e => setCode(e.target.value),
+    placeholder: enabled ? 'New passcode' : 'Passcode (6+ characters)',
+    className: inputCls
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    value: confirm,
+    onChange: e => setConfirm(e.target.value),
+    placeholder: "Repeat it",
+    className: inputCls
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: save,
+    disabled: !code || !confirm,
+    className: "w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800 disabled:opacity-50"
+  }, enabled ? 'Change passcode' : 'Turn lock on')), msg && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-emerald-700 mt-2"
+  }, msg), err && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-red-700 mt-2"
+  }, err));
+}
+
 // ---------- Crash guard ----------
 // A thrown render error would otherwise leave a blank white screen with no clue
 // what happened. Catch it, show it, and let the app be restarted without losing
@@ -7286,6 +8001,9 @@ function RelationshipTracker() {
   const [dateConfirm, setDateConfirm] = useState(null);
   const [backupNag, setBackupNag] = useState(false);
   const [exportStamp, setExportStamp] = useState('');
+  const [locked, setLocked] = useState(() => Lock.enabled());
+  const hiddenAt = React.useRef(null);
+  const [lockVersion, setLockVersion] = useState(0);
   const [syncState, setSyncState] = useState({
     status: Sync.configured() ? 'idle' : 'off',
     last: Sync.lastPull(),
@@ -7303,6 +8021,20 @@ function RelationshipTracker() {
     load().then(() => {
       if (Sync.configured()) pullFromCloud(true);
     });
+  }, []);
+
+  // Re-lock after five minutes in the background, not on every glance away.
+  useEffect(() => {
+    function onVisibility() {
+      if (document.hidden) {
+        hiddenAt.current = Date.now();
+        return;
+      }
+      if (Lock.enabled() && hiddenAt.current && Date.now() - hiddenAt.current > 5 * 60 * 1000) setLocked(true);
+      hiddenAt.current = null;
+    }
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
   }, []);
   async function load() {
     setLoading(true);
@@ -7790,7 +8522,8 @@ function RelationshipTracker() {
       dropped
     } = mergeSessions(target.conversationDays, incoming, knownKeys);
     if (!addedPoints && !addedFacts) {
-      setError(dropped ? 'Everything in that screenshot was already logged for ' + target.name + ' — nothing new added.' : 'Nothing could be read from that screenshot.');
+      const why = dropped ? 'Everything in that screenshot was already logged for ' + target.name + ' — nothing new added.' : !payload.sessions.length ? 'No conversation could be read from that image. If the text is very small, try splitting the screenshot into two or three shorter ones.' : 'The image was read but nothing worth logging came out of it — it may be all small talk.';
+      setError(why + (payload.imageWarnings && payload.imageWarnings.length ? ' ' + payload.imageWarnings.join(' ') : '') + (payload.failedSections && payload.failedSections.length ? ' Sections ' + payload.failedSections.join(', ') + ' failed to read.' : ''));
       return {
         added: 0,
         dropped
@@ -7819,7 +8552,7 @@ function RelationshipTracker() {
     } : p));
     setError('');
     const matchNote = !target.dateMet && !payload.matchedDate && inferredMatch ? ' Match date set to ' + inferredMatch + ' from the first message — edit if wrong.' : '';
-    setNotice(addedPoints + ' line' + (addedPoints === 1 ? '' : 's') + ' and ' + addedFacts + ' fact' + (addedFacts === 1 ? '' : 's') + ' added to ' + target.name + (dropped ? ', ' + dropped + ' duplicate' + (dropped === 1 ? '' : 's') + ' skipped' : '') + '.' + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : '') + matchNote);
+    setNotice(addedPoints + ' line' + (addedPoints === 1 ? '' : 's') + ' and ' + addedFacts + ' fact' + (addedFacts === 1 ? '' : 's') + ' added to ' + target.name + (dropped ? ', ' + dropped + ' duplicate' + (dropped === 1 ? '' : 's') + ' skipped' : '') + '.' + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : '') + (payload.imageWarnings && payload.imageWarnings.length ? ' ' + payload.imageWarnings[0] : '') + (payload.failedSections && payload.failedSections.length ? ' Note: ' + payload.failedSections.length + ' section(s) of the image could not be read, so some of the conversation may be missing.' : '') + matchNote);
     return {
       added: addedPoints,
       dropped
@@ -7991,6 +8724,9 @@ function RelationshipTracker() {
   }, [people]);
 
   // ---------- Detail (single person) view ----------
+  if (locked) return /*#__PURE__*/React.createElement(LockScreen, {
+    onUnlock: () => setLocked(false)
+  });
   if (selected) {
     const labels = dateLabelsForPerson(selected);
     const sortedDates = [...(selected.dates || [])].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -8276,7 +9012,9 @@ function RelationshipTracker() {
       onExported: d => {
         setExportStamp(d);
         setBackupNag(false);
-      }
+      },
+      onLockChanged: () => setLockVersion(v => v + 1),
+      lockVersion: lockVersion
     }), error && /*#__PURE__*/React.createElement(ErrorToast, {
       message: error
     }));
@@ -8516,7 +9254,9 @@ function RelationshipTracker() {
     onExported: d => {
       setExportStamp(d);
       setBackupNag(false);
-    }
+    },
+    onLockChanged: () => setLockVersion(v => v + 1),
+    lockVersion: lockVersion
   }));
 }
 
@@ -10686,7 +11426,9 @@ function SettingsModal({
   onConnectSync,
   onDisconnectSync,
   onSyncNow,
-  onExported
+  onExported,
+  onLockChanged,
+  lockVersion
 }) {
   const [apiKey, setApiKey] = useState(() => Local.get('anthropic-api-key') || '');
   const [showKey, setShowKey] = useState(false);
@@ -10804,7 +11546,10 @@ function SettingsModal({
     className: "text-xs text-red-700 mt-2"
   }, importErr), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-stone-400 mt-3"
-  }, "Build ", BUILD_STAMP), /*#__PURE__*/React.createElement(SyncPanel, {
+  }, "Build ", BUILD_STAMP), /*#__PURE__*/React.createElement(LockPanel, {
+    key: lockVersion,
+    onChanged: onLockChanged
+  }), /*#__PURE__*/React.createElement(SyncPanel, {
     syncState: syncState,
     onConnect: onConnectSync,
     onDisconnect: onDisconnectSync,
