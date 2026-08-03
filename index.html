@@ -395,7 +395,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-03 16:16';
+const BUILD_STAMP = '2026-08-03 17:54';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -1922,7 +1922,7 @@ function conversationSignals(person) {
   };
 }
 
-function buildCoachContext(person) {
+function buildCoachContext(person, brief) {
   const lines = [];
   const p = { ...emptyProfile(), ...(person.profile || {}) };
   const closure = closureState(person);
@@ -1963,10 +1963,12 @@ function buildCoachContext(person) {
   const chron = buildChronology(person);
   if (chron.length) {
     lines.push('Timeline, oldest first (chat and real-world dates interleaved):');
-    chron.slice(-30).forEach(item => {
+    const shown = chron.slice(brief ? -15 : -30);
+    if (shown.length < chron.length) lines.push('  (' + (chron.length - shown.length) + ' earlier entries omitted)');
+    shown.forEach(item => {
       if (item.kind === 'chat') {
         lines.push('  ' + (item.date || 'undated') + ' MESSAGES — ' + (item.day.summary || 'no summary'));
-        (item.day.facts || []).forEach(f => lines.push('      fact: ' + f));
+        if (!brief) (item.day.facts || []).forEach(f => lines.push('      fact: ' + f));
       } else if (item.kind === 'contact') {
         lines.push('  ' + item.date + ' ' + (item.entry.type || 'Contact').toUpperCase()
           + ' — YOUR OWN ACCOUNT (nothing else records this): ' + item.entry.text);
@@ -2029,27 +2031,42 @@ function buildCoachContext(person) {
   return lines.join('\n');
 }
 
-async function generateCoachSummary(person) {
-  const body = buildCoachContext(person) + '\n\n' + COACH_PROMPT;
-  let result;
-  try {
-    result = await callVision([{ type: 'text', text: body }], 2000);
-  } catch (e) {
-    if (e.code !== 'TRUNCATED' && e.code !== 'BAD_JSON') throw e;
-    // Once more with more room and an explicit brevity instruction.
+async function generateCoachSummary(person, onProgress) {
+  const full = buildCoachContext(person) + '\n\n' + COACH_PROMPT;
+  const attempts = [
+    { text: full, tokens: 4000, label: null },
+    {
+      text: full + '\n\nKeep the whole reply under 250 words. Do not restate the facts back to me.',
+      tokens: 8000,
+      label: 'Reply came back cut short — trying again more concisely…',
+    },
+    {
+      // Last resort: less detail in, less asked for out. Better a short read than none.
+      text: buildCoachContext(person, true) + '\n\n' + COACH_PROMPT
+        + '\n\nReturn "dateNotes" as an empty array and keep the whole reply under 150 words.',
+      tokens: 4000,
+      label: 'Still too long — falling back to a short read…',
+    },
+  ];
+
+  let result = null, lastErr = null, salvage = null;
+  for (const attempt of attempts) {
+    if (attempt.label && onProgress) onProgress(attempt.label);
     try {
-      result = await callVision([{
-        type: 'text',
-        text: body + '\n\nKeep it tight: the whole reply must be under 200 words. Do not restate the facts back to me.',
-      }], 3000);
-    } catch (e2) {
-      // Last resort: use the first attempt's partial, but only if it is complete
-      // enough to be worth showing.
-      const salvage = e2.partial || e.partial;
-      if (salvage && salvage.status && salvage.recommendation) result = salvage;
-      else throw e2;
+      result = await callVision([{ type: 'text', text: attempt.text }], attempt.tokens);
+      break;
+    } catch (e) {
+      if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+      lastErr = e;
+      if (e.partial && e.partial.status && !salvage) salvage = e.partial;
+      if (e.code !== 'TRUNCATED' && e.code !== 'BAD_JSON') throw e;
     }
   }
+  if (!result) {
+    if (salvage) result = salvage;                 // a partial with a status still says something
+    else throw lastErr || new Error('Could not get a read.');
+  }
+
   return {
     interestLevel: Number.isFinite(Number(result.interestLevel)) ? Math.max(0, Math.min(100, Math.round(Number(result.interestLevel)))) : null,
     vibe: String(result.vibe || '').trim(),
@@ -2655,8 +2672,9 @@ function RelationshipTracker() {
     setCoachBusy(true);
     setCoachError('');
     try {
-      const read = await generateCoachSummary(selected);
+      const read = await generateCoachSummary(selected, msg => setCoachError(msg));
       await persist(peopleRef.current.map(p => p.id === selected.id ? { ...p, coachRead: read } : p));
+      setCoachError('');
     } catch (e) {
       setCoachError(friendlyExtractError(e) || 'Could not get a read right now.');
     }
@@ -5757,7 +5775,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-03 16:16';
+const BUILD_STAMP = '2026-08-03 17:54';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -7474,7 +7492,7 @@ function conversationSignals(person) {
     sheOpened: openers.length - heOpened
   };
 }
-function buildCoachContext(person) {
+function buildCoachContext(person, brief) {
   const lines = [];
   const p = {
     ...emptyProfile(),
@@ -7510,10 +7528,12 @@ function buildCoachContext(person) {
   const chron = buildChronology(person);
   if (chron.length) {
     lines.push('Timeline, oldest first (chat and real-world dates interleaved):');
-    chron.slice(-30).forEach(item => {
+    const shown = chron.slice(brief ? -15 : -30);
+    if (shown.length < chron.length) lines.push('  (' + (chron.length - shown.length) + ' earlier entries omitted)');
+    shown.forEach(item => {
       if (item.kind === 'chat') {
         lines.push('  ' + (item.date || 'undated') + ' MESSAGES — ' + (item.day.summary || 'no summary'));
-        (item.day.facts || []).forEach(f => lines.push('      fact: ' + f));
+        if (!brief) (item.day.facts || []).forEach(f => lines.push('      fact: ' + f));
       } else if (item.kind === 'contact') {
         lines.push('  ' + item.date + ' ' + (item.entry.type || 'Contact').toUpperCase() + ' — YOUR OWN ACCOUNT (nothing else records this): ' + item.entry.text);
       } else {
@@ -7552,28 +7572,43 @@ function buildCoachContext(person) {
   lines.push('Today is ' + TODAY() + '.');
   return lines.join('\n');
 }
-async function generateCoachSummary(person) {
-  const body = buildCoachContext(person) + '\n\n' + COACH_PROMPT;
-  let result;
-  try {
-    result = await callVision([{
-      type: 'text',
-      text: body
-    }], 2000);
-  } catch (e) {
-    if (e.code !== 'TRUNCATED' && e.code !== 'BAD_JSON') throw e;
-    // Once more with more room and an explicit brevity instruction.
+async function generateCoachSummary(person, onProgress) {
+  const full = buildCoachContext(person) + '\n\n' + COACH_PROMPT;
+  const attempts = [{
+    text: full,
+    tokens: 4000,
+    label: null
+  }, {
+    text: full + '\n\nKeep the whole reply under 250 words. Do not restate the facts back to me.',
+    tokens: 8000,
+    label: 'Reply came back cut short — trying again more concisely…'
+  }, {
+    // Last resort: less detail in, less asked for out. Better a short read than none.
+    text: buildCoachContext(person, true) + '\n\n' + COACH_PROMPT + '\n\nReturn "dateNotes" as an empty array and keep the whole reply under 150 words.',
+    tokens: 4000,
+    label: 'Still too long — falling back to a short read…'
+  }];
+  let result = null,
+    lastErr = null,
+    salvage = null;
+  for (const attempt of attempts) {
+    if (attempt.label && onProgress) onProgress(attempt.label);
     try {
       result = await callVision([{
         type: 'text',
-        text: body + '\n\nKeep it tight: the whole reply must be under 200 words. Do not restate the facts back to me.'
-      }], 3000);
-    } catch (e2) {
-      // Last resort: use the first attempt's partial, but only if it is complete
-      // enough to be worth showing.
-      const salvage = e2.partial || e.partial;
-      if (salvage && salvage.status && salvage.recommendation) result = salvage;else throw e2;
+        text: attempt.text
+      }], attempt.tokens);
+      break;
+    } catch (e) {
+      if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+      lastErr = e;
+      if (e.partial && e.partial.status && !salvage) salvage = e.partial;
+      if (e.code !== 'TRUNCATED' && e.code !== 'BAD_JSON') throw e;
     }
+  }
+  if (!result) {
+    if (salvage) result = salvage; // a partial with a status still says something
+    else throw lastErr || new Error('Could not get a read.');
   }
   return {
     interestLevel: Number.isFinite(Number(result.interestLevel)) ? Math.max(0, Math.min(100, Math.round(Number(result.interestLevel)))) : null,
@@ -8303,11 +8338,12 @@ function RelationshipTracker() {
     setCoachBusy(true);
     setCoachError('');
     try {
-      const read = await generateCoachSummary(selected);
+      const read = await generateCoachSummary(selected, msg => setCoachError(msg));
       await persist(peopleRef.current.map(p => p.id === selected.id ? {
         ...p,
         coachRead: read
       } : p));
+      setCoachError('');
     } catch (e) {
       setCoachError(friendlyExtractError(e) || 'Could not get a read right now.');
     }
