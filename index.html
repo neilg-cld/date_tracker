@@ -373,8 +373,11 @@ function newPersonRecord(overrides = {}) {
     id: 'p-' + Date.now() + Math.random().toString(36).slice(2, 6),
     name: '', meetingChannel: '', dateMet: '', stage: 'Talking Stage',
     phone: '', notes: '', endReason: '', endDate: '', endNotes: '', lastContact: '',
+    relStart: '', relEnd: '', relType: '',
     profile: emptyProfile(),
-    photos: [], profilePhotoId: null, conversationLog: [], dates: [],
+    myRead: emptyMyRead(),
+    photos: [], profilePhotoId: null, conversationLog: [], contactLog: [], dates: [],
+    dateSuggestions: [], dismissedDateKeys: [], conversationDays: [],
     ...overrides,
   };
 }
@@ -395,7 +398,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-03 17:54';
+const BUILD_STAMP = '2026-08-03 18:40';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -715,6 +718,7 @@ function backfillPerson(p) {
     photos: [], profilePhotoId: null, conversationLog: [], phone: '', lastContact: '',
     dateSuggestions: [], dismissedDateKeys: [], conversationDays: [], contactLog: [],
     ...p,
+    myRead: { ...emptyMyRead(), ...(p.myRead || {}) },
     profile: { ...emptyProfile(), ...(p.profile || {}) },
   };
   // Older photos were single low-res thumbnails; keep them working.
@@ -751,7 +755,11 @@ function migrateConversationLog(log) {
   return out;
 }
 
-const DAY_SUMMARY_PROMPT = `Below is one day's worth of an already-condensed chat log between the reader and a woman he is dating. "Me" is the reader, "She" is her. This is his own private record, so write it TO HIM in the second person — "you" and "she", never "he", "him" or "the user". Respond with ONLY a JSON object, no other text, no markdown fences:
+const DAY_SUMMARY_PROMPT = `Below is one day's worth of an already-condensed chat log between the reader and a woman he is dating. "Me" is the reader, "She" is her. This is his own private record, so write it TO HIM in the second person — "you" and "she", never "he", "him" or "the user".
+
+Ignore anything neither of you actually said: encryption notices, "missed voice call" rows, read receipts, app prompts and banners. Judge what mattered rather than listing turns — a fact about her life, a plan made or dropped, a change in warmth. A day of pleasantries deserves an empty facts array, not invented significance. Read tone as a person would: a one-word answer after a long silence is not warmth, whatever the words say.
+
+Respond with ONLY a JSON object, no other text, no markdown fences:
 {
 "summary": string — two or three sentences addressed to him on what this exchange was about and how it went between you and her. For example: "You opened about her hiking photo and she came back warmly, though she kept it brief." Never write about him in the third person.
 "facts": array of short strings — the things worth remembering, written to him: what she revealed about her life, work, family, plans or opinions; anything you agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, compliments and other small talk. Empty array if it was all small talk.
@@ -820,6 +828,58 @@ function daysFromFlatLog(log) {
     byDate[d].points.push(p);
   });
   return Object.values(byDate).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+}
+
+// ---------- Your side of it: intent, interest, logistics ----------
+// The app measured her closely and never asked what you actually want. Advice
+// without that is advice for a man with one setting.
+
+const INTENTIONS = [
+  { key: 'undecided', label: 'Seeing what\'s there', blurb: 'Early days, no decision made.' },
+  { key: 'shortterm', label: 'Short-term / fun', blurb: 'Attraction is there, not looking to build anything.' },
+  { key: 'ongoing_casual', label: 'Ongoing but casual', blurb: 'Happy seeing her regularly with no title on it.' },
+  { key: 'open_serious', label: 'Open to serious', blurb: 'Would let it become something if it earns that.' },
+  { key: 'longterm', label: 'Looking for a partner', blurb: 'This is the outcome you actually want.' },
+  { key: 'friendship', label: 'Friendship only', blurb: 'You enjoy her, the romantic side is not on.' },
+  { key: 'winding_down', label: 'Winding it down', blurb: 'On the way out, handling it decently.' },
+];
+
+const TRAVEL_OPTIONS = ['Under 20 min', '20–45 min', '45–90 min', 'Over 90 min'];
+const SCHEDULE_OPTIONS = ['Easy — we can meet most weeks', 'Workable with notice', 'Difficult — rarely line up'];
+const LIFE_FIT_OPTIONS = ['Fits my life well', 'Some friction', 'Pulling against my life'];
+
+function emptyMyRead() {
+  return {
+    interest: null,          // 0-100, your side, mirroring hers
+    intention: '',
+    attraction: 0,           // 1-5
+    enjoyment: 0,            // 1-5, how much you like her company
+    travel: '',
+    schedules: '',
+    lifeFit: '',
+    dealbreakers: '',
+    notes: '',
+    flags: [],               // things you have clocked yourself
+  };
+}
+
+function intentionLabel(key) {
+  const found = INTENTIONS.find(i => i.key === key);
+  return found ? found.label : '';
+}
+
+function myReadIsEmpty(r) {
+  if (!r) return true;
+  return r.interest === null && !r.intention && !r.attraction && !r.enjoyment
+    && !r.travel && !r.schedules && !r.lifeFit && !r.dealbreakers && !r.notes && !(r.flags || []).length;
+}
+
+// The gap between what she is giving and what you are giving is the whole game.
+function interestGap(person) {
+  const mine = person.myRead && person.myRead.interest;
+  const hers = person.coachRead && person.coachRead.interestLevel;
+  if (typeof mine !== 'number' || typeof hers !== 'number') return null;
+  return { mine, hers, gap: mine - hers };
 }
 
 // ---------- Relationship shape: span, classification, closure ----------
@@ -1046,6 +1106,15 @@ WORK OUT WHO IS WHO BEFORE YOU SUMMARISE. This is the part that goes wrong most 
 - In almost every app the user's own messages are aligned to the RIGHT in the app's accent colour; hers are on the LEFT in grey or white. Decide which side is which once, from the clearest evidence, then apply it consistently.
 - "Delivered", "Read" and "Sent" appear under the USER's messages; a small avatar usually sits beside HERS.
 - Sense-check: if a message answers a question, it was written by whoever did not ask it. If your attribution has one person asking and answering their own questions, flip it.
+
+IGNORE THE FURNITURE. A screenshot is full of things neither of you said. None of the following is ever a message, a fact, a session or an event, and none of it belongs in your output: the app's encryption notice ("Messages and calls are end-to-end encrypted"), disappearing-message notices, "You matched", "Say hi", blocked/report banners, delivery and read receipts, typing indicators, "Missed voice call" rows, date dividers themselves, unread-count separators, stickers and reaction badges, and any advertising or safety prompt the app inserts. If a whole session contains nothing but this, leave it out entirely.
+
+READ IT LIKE A PERSON, NOT A PARSER. You are summarising a conversation between two adults for the man's own private record. Judge what actually mattered:
+- Something is worth recording if it would matter to him in a month: a fact about her life, a plan made or dropped, a change in warmth, a boundary, a decision.
+- Small talk, weather, "how was your day", emoji, courtesy, and repeated logistics chatter about the same arrangement are not worth recording. Say what the exchange amounted to instead of listing every turn.
+- Where the two of you were clearly arranging something, record the arrangement and its outcome — not each message about it.
+- Read tone as a person would. Someone answering a question with one word after a long gap is not "chatting warmly", whatever the words say.
+- Never manufacture significance to fill the fields. An empty facts array is the right answer for a day of pleasantries.
 
 SPLIT THE CHAT INTO SESSIONS. A session is one continuous burst of conversation — normally everything under a single date or day divider, or a run of messages close together in time after a gap. Most screenshots contain several. Summarise each session separately, in order.
 
@@ -1871,6 +1940,24 @@ ACTIONS OUTWEIGH WORDS — BUT BEFORE A FIRST DATE, HER MESSAGE BEHAVIOUR IS THE
 - Bobby Rio: intrigue and playful tension. Don't hand over everything you think; leave her curious.
 - Orion Taragan: relaxed masculine frame — you are not auditioning, you are deciding whether she suits you.
 
+WHAT HE WANTS DECIDES WHAT GOOD LOOKS LIKE. You may be told his intention. Advice must follow it rather than assuming everyone is chasing a wife:
+- Seeing what's there — help him find out quickly: get her in front of him and see whether there is anything in the room.
+- Short-term / fun — do not push him toward commitment talk or long-horizon compatibility. Attraction and easy logistics matter; her views on children do not. Be straight about one thing: she is entitled to know it is not going somewhere, and stringing her along is beneath him.
+- Ongoing but casual — protect the rhythm. The risk is drift into an unspoken relationship neither of you chose.
+- Open to serious — test compatibility properly, and watch whether her behaviour is building toward something or coasting.
+- Looking for a partner — compatibility, availability and intent matter as much as attraction. Time spent on someone who cannot give him what he wants is the expensive mistake here.
+- Friendship only — no romantic coaching. Help him keep it clean and unambiguous.
+- Winding it down — help him end it kindly, clearly and once.
+If his intention and her behaviour are pulling in different directions, say so plainly. That mismatch is usually the whole story.
+
+INTEREST GAP. Where you have both numbers, compare them. Him well above her means he is doing the chasing — pull back, invest proportionally. Her well above him means he needs to decide honestly whether he is going anywhere with this, and not keep her warm out of vanity.
+
+LOGISTICS ARE PART OF COMPATIBILITY, not an afterthought. Ninety minutes of driving, schedules that never line up, or a life that pulls against his own will kill a promising thing regardless of chemistry — and are worth tolerating for something genuinely good. Weigh what he told you about travel, schedules and fit, and say when the practical picture undermines the romantic one.
+
+RED FLAGS. Name them when you see them, once, without lecturing. The standard ones: still hung up on an ex, cancelling repeatedly, hot then cold, only available at odd hours, evasive about her circumstances, money appearing early, pushing for private contact or platforms too fast, contempt about previous partners, love-bombing, inconsistencies in her story, or pressure that makes him uneasy. Include anything he has clocked himself and take it seriously — he was there. Flag it, say why it matters, and leave the decision to him. He is a grown man having a good time, not a case to be managed.
+
+TONE. Lighthearted and dry, like a sharp friend across a pint. He is in his fifties, enjoying his dating life, not out to hurt anyone and not in need of a lecture. No therapy-speak, no solemnity, no moralising — but do not soften a hard truth to be liked. A well-placed joke is fine; a wasted month is not.
+
 READ THE EVIDENCE PROPERLY. This is where a lazy read goes wrong:
 - The timeline you are given is the complete record. Do NOT invent events. If no date is listed as Completed, you have not met her. If a date is Cancelled, it did not happen. Never describe something as having gone well unless there is a written account saying so.
 - Your account of a date is HIS OWN WRITING and is the only record of what happened face to face. It outranks everything in the messages. Where his notes and the chat disagree, follow his notes and say so out loud.
@@ -1892,6 +1979,11 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 "interestLevel": integer 0-100 — for a live connection, her interest level now. For one that is over, her interest level at its highest point, which tells him what he was actually working with, judged from behaviour, not words. Be honest and specific rather than generous. If there is too little evidence, use 50 and say so in the status.
 "vibe": string — three to five words. For a live connection, the temperature now. For one that is over, what it amounted to, e.g. "Ran out of road", "She was never in it", "Good while it lasted", e.g. "High interest, moving fast", "Polite, low interest", "Cooling since the second date", "Too early to call".
 "status": string — 3-5 sentences addressed to him. If it is live, what is actually happening between you and her. If it is over, what happened and why, across the whole arc. Cite the concrete evidence: what you wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
+"relationshipStart": string or null — "YYYY-MM", the month this began, judged from the record: the month you matched, or the first contact you can see. Null only if there is nothing to go on.
+"relationshipEnd": string or null — "YYYY-MM", the month it ended, but ONLY if it is genuinely over: she ended it, you ended it, or it has faded with no contact for months and nothing arranged. Null if it is still live, even if it is going badly. Do not close something down over a fortnight's quiet.
+"isOver": true or false — your judgement on whether this is finished. Be honest rather than hopeful: months of silence with no arrangement is finished, whatever either of you last said.
+"redFlags": array of objects {"flag": string (a few words), "why": string (one sentence on what it tends to mean), "severity": "note" or "watch" or "serious"} — anything worth him seeing, from her behaviour or from what he has clocked himself. Empty array if there is genuinely nothing. Do not invent flags to look thorough.
+"alignment": string or null — one sentence on whether what he wants and what she is doing point the same way. Null if you do not know his intention.
 "dateNotes": array of objects {"date": "YYYY-MM-DD", "read": string} — one entry for each COMPLETED date in the timeline, in date order. "read" is one or two sentences of YOUR interpretation of that particular meeting: what it tells you about her interest level and where things stood after it. Do not repeat your own notes back at you — you wrote them and can read them. Interpret them instead. If you wrote nothing about a date, say what that silence leaves unknown. Empty array if there are no completed dates.
 "recommendation": string — 2-4 sentences. If it is live, the single next move, why it works and what to avoid. If it is over, the lesson to carry forward: the pattern to watch for, the thing to do differently, or the standard to hold next time. Never suggest contacting a woman it is over with. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him plainly to stop investing.
 }
@@ -2011,6 +2103,28 @@ function buildCoachContext(person, brief) {
       : 'you have never arranged a date with her — the interest level here is provisional, judged on messages only')
     + (cancelled ? '; ' + cancelled + ' cancelled or no-show' : '') + '.');
 
+  const mine = { ...emptyMyRead(), ...(person.myRead || {}) };
+  if (!myReadIsEmpty(mine)) {
+    lines.push('--- YOUR SIDE (you told the app this yourself) ---');
+    if (mine.intention) {
+      const def = INTENTIONS.find(i => i.key === mine.intention);
+      lines.push('Your intention with her: ' + (def ? def.label + ' — ' + def.blurb : mine.intention));
+    }
+    if (typeof mine.interest === 'number') lines.push('Your own interest level: ' + mine.interest + '/100');
+    if (mine.attraction) lines.push('Attraction: ' + mine.attraction + '/5');
+    if (mine.enjoyment) lines.push('How much you enjoy her company: ' + mine.enjoyment + '/5');
+    if (mine.travel) lines.push('Travel to see her: ' + mine.travel);
+    if (mine.schedules) lines.push('Schedules: ' + mine.schedules);
+    if (mine.lifeFit) lines.push('Fit with the life you want: ' + mine.lifeFit);
+    if (mine.dealbreakers) lines.push('Your dealbreakers: ' + mine.dealbreakers);
+    (mine.flags || []).forEach(f => lines.push('You have already clocked: ' + f));
+    if (mine.notes) lines.push('Your own notes on where you stand: ' + mine.notes);
+    lines.push('--- end of your side ---');
+  } else {
+    lines.push('You have not recorded your own intention or interest level for her. Say plainly in the status that '
+      + 'you cannot judge whether to invest without knowing what he wants, and ask him to fill in "Where you stand".');
+  }
+
   const sig = conversationSignals(person);
   if (sig) {
     lines.push('Measured message signals: ' + sig.total + ' logged lines, ' + sig.herShare + '% of them hers, '
@@ -2073,6 +2187,17 @@ async function generateCoachSummary(person, onProgress) {
     status: String(result.status || '').trim(),
     recommendation: String(result.recommendation || '').trim(),
     generatedAt: new Date().toISOString(),
+    redFlags: Array.isArray(result.redFlags)
+      ? result.redFlags.map(f => ({
+          flag: String(f.flag || '').trim(),
+          why: String(f.why || '').trim(),
+          severity: ['note', 'watch', 'serious'].includes(f.severity) ? f.severity : 'note',
+        })).filter(f => f.flag)
+      : [],
+    alignment: String(result.alignment || '').trim(),
+    relationshipStart: /^\d{4}-\d{2}$/.test(String(result.relationshipStart || '')) ? result.relationshipStart : '',
+    relationshipEnd: /^\d{4}-\d{2}$/.test(String(result.relationshipEnd || '')) ? result.relationshipEnd : '',
+    isOver: result.isOver === true,
     dateNotes: Array.isArray(result.dateNotes)
       ? result.dateNotes.map(d => ({ date: String(d.date || '').slice(0, 10), read: String(d.read || '').trim() }))
           .filter(d => d.date && d.read)
@@ -2122,7 +2247,7 @@ function InterestGauge({ value, size }) {
   );
 }
 
-function StatusPanel({ read, busy, error, onRefresh, onOpenSettings }) {
+function StatusPanel({ read, busy, error, onRefresh, onOpenSettings, myRead }) {
   const needsKey = !Local.get('anthropic-api-key');
   return (
     <div className="bg-white border border-stone-200 rounded-lg p-4 mb-4">
@@ -2154,6 +2279,11 @@ function StatusPanel({ read, busy, error, onRefresh, onOpenSettings }) {
           </button>
         )}
       </div>
+      {!needsKey && !error && myReadIsEmpty(myRead) && (
+        <p className="text-xs text-amber-700 mb-2">
+          Fill in "Where you stand" below first — without your intention the advice is generic.
+        </p>
+      )}
       {needsKey && !error && (
         <p className="text-sm text-stone-500">
           A read needs an Anthropic API key. It lives on this device only, so each browser you use needs it entered once.
@@ -2183,10 +2313,38 @@ function StatusPanel({ read, busy, error, onRefresh, onOpenSettings }) {
             <p className="text-xs text-amber-700">This read predates the interest-level score. Refresh to get one.</p>
           )}
           <p className="text-sm text-stone-800">{read.status}</p>
+          {read.alignment && (
+            <p className="text-sm text-stone-700 bg-stone-50 border border-stone-200 rounded-md px-2.5 py-2">
+              {read.alignment}
+            </p>
+          )}
+
           <div className="border-l-2 border-stone-900 pl-2.5">
             <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-0.5">Next move</div>
             <p className="text-sm text-stone-800">{read.recommendation}</p>
           </div>
+
+          {(read.redFlags || []).length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-1">
+                Worth knowing — your call
+              </div>
+              <div className="space-y-1.5">
+                {read.redFlags.map((f, i) => (
+                  <div key={i} className={`rounded-md px-2.5 py-2 border ${
+                    f.severity === 'serious' ? 'bg-red-50 border-red-200'
+                      : f.severity === 'watch' ? 'bg-amber-50 border-amber-200'
+                      : 'bg-stone-50 border-stone-200'
+                  }`}>
+                    <div className={`text-sm font-medium ${
+                      f.severity === 'serious' ? 'text-red-800' : f.severity === 'watch' ? 'text-amber-900' : 'text-stone-800'
+                    }`}>{f.flag}</div>
+                    {f.why && <div className="text-xs text-stone-600 mt-0.5">{f.why}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <p className="text-[11px] text-stone-400">Read taken {formatReadStamp(read.generatedAt)}.</p>
         </div>
       )}
@@ -2484,6 +2642,7 @@ function RelationshipTracker() {
   const [stageFilter, setStageFilter] = useState('Active');
   const [showInsights, setShowInsights] = useState(false);
   const [showProfileEdit, setShowProfileEdit] = useState(false);
+  const [showMyRead, setShowMyRead] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   const [chatImport, setChatImport] = useState(null);
   const [notice, setNotice] = useState('');
@@ -2673,8 +2832,23 @@ function RelationshipTracker() {
     setCoachError('');
     try {
       const read = await generateCoachSummary(selected, msg => setCoachError(msg));
-      await persist(peopleRef.current.map(p => p.id === selected.id ? { ...p, coachRead: read } : p));
+      await persist(peopleRef.current.map(p => {
+        if (p.id !== selected.id) return p;
+        const next = { ...p, coachRead: read };
+        // Fill the period from the read, but never overwrite what you entered.
+        if (!p.relStart && read.relationshipStart) next.relStart = read.relationshipStart;
+        if (!p.relEnd && read.relationshipEnd && read.isOver) {
+          next.relEnd = read.relationshipEnd;
+          if (p.stage !== 'Ended') {
+            next.stage = 'Ended';
+            next.endDate = p.endDate || read.relationshipEnd + '-01';
+            next.endReason = p.endReason || 'Faded out';
+          }
+        }
+        return next;
+      }));
       setCoachError('');
+      if (read.isOver && !selected.relEnd) setNotice('Marked as ended in ' + read.relationshipEnd + ' — change it in Edit if that is wrong.');
     } catch (e) {
       setCoachError(friendlyExtractError(e) || 'Could not get a read right now.');
     }
@@ -3117,6 +3291,30 @@ function RelationshipTracker() {
                   </span>
                 </div>
                 <div className="mt-1 text-sm text-stone-600 space-y-0.5">
+                  {(() => {
+                    const start = relStartYm(selected), end = relEndYm(selected);
+                    if (!start) return null;
+                    const span = relSpanMonths(selected);
+                    const closure = closureState(selected);
+                    const fmt = m => m ? new Date(m + '-01T00:00:00').toLocaleDateString('en-IE', { month: 'short', year: 'numeric' }) : '';
+                    return (
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <Calendar className="w-3.5 h-3.5 shrink-0" />
+                        <span className="font-medium text-stone-800">
+                          {fmt(start)} – {end ? fmt(end) : 'now'}
+                        </span>
+                        {span !== null && <span className="text-stone-500">· {formatSpan(span)}</span>}
+                        <span className="text-[10px] uppercase tracking-wide bg-stone-100 text-stone-700 rounded-full px-2 py-0.5">
+                          {classifyRelationship(selected)}
+                        </span>
+                        {closure.closed && (
+                          <span className="text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5">
+                            {closure.label}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {selected.meetingChannel && (
                     <div className="flex items-center gap-1.5"><MessageCircle className="w-3.5 h-3.5" /> Matched on {selected.meetingChannel}</div>
                   )}
@@ -3137,30 +3335,6 @@ function RelationshipTracker() {
                   <div className="mt-2 text-sm text-stone-600 bg-stone-50 border border-stone-200 rounded-md p-2">
                     <div className="flex items-center gap-1.5 font-medium text-stone-800"><Flag className="w-3.5 h-3.5" /> {selected.endReason || 'Ended'}</div>
                     {selected.endDate && <div>Ended {selected.endDate}</div>}
-                    {(() => {
-                      const span = relSpanMonths(selected);
-                      const closure = closureState(selected);
-                      const start = relStartYm(selected), end = relEndYm(selected);
-                      if (!start) return null;
-                      const fmt = m => m ? new Date(m + '-01T00:00:00').toLocaleDateString('en-IE', { month: 'short', year: 'numeric' }) : '';
-                      return (
-                        <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-                          <span className="text-stone-600">
-                            {fmt(start)}{end ? ' – ' + fmt(end) : ' – now'}
-                            {span !== null ? ' · ' + formatSpan(span) : ''}
-                          </span>
-                          <span className="text-[10px] uppercase tracking-wide bg-stone-100 text-stone-700 rounded-full px-2 py-0.5">
-                            {classifyRelationship(selected)}
-                          </span>
-                          {closure.closed && (
-                            <span className="text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5">
-                              {closure.label}
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })()}
-                    {selected.endNotes && <div className="mt-1">{selected.endNotes}</div>}
                   </div>
                 )}
                 </div>
@@ -3221,6 +3395,13 @@ function RelationshipTracker() {
             error={coachError}
             onRefresh={refreshCoachRead}
             onOpenSettings={() => setShowSettings(true)}
+            myRead={selected.myRead}
+          />
+
+          <MyReadCard
+            myRead={selected.myRead}
+            coachRead={selected.coachRead}
+            onEdit={() => setShowMyRead(true)}
           />
 
           <ProfileCard profile={selected.profile || emptyProfile()} onEdit={() => setShowProfileEdit(true)} />
@@ -3347,6 +3528,16 @@ function RelationshipTracker() {
             initial={contactNote}
             onCancel={() => setContactNote(null)}
             onSave={saveContactNote}
+          />
+        )}
+        {showMyRead && (
+          <MyReadModal
+            myRead={selected.myRead}
+            onCancel={() => setShowMyRead(false)}
+            onSave={async (draft) => {
+              await persist(peopleRef.current.map(p => p.id === selected.id ? { ...p, myRead: draft } : p));
+              setShowMyRead(false);
+            }}
           />
         )}
         {showProfileEdit && (
@@ -3597,6 +3788,16 @@ function RelationshipTracker() {
                       {p.coachRead.vibe && (
                         <span className="text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5">
                           {p.coachRead.vibe}
+                        </span>
+                      )}
+                      {p.myRead && p.myRead.intention && (
+                        <span className="text-[10px] uppercase tracking-wide bg-stone-100 text-stone-600 rounded-full px-2 py-0.5">
+                          {intentionLabel(p.myRead.intention)}
+                        </span>
+                      )}
+                      {(p.coachRead.redFlags || []).length > 0 && (
+                        <span className="text-[10px] font-semibold rounded-full px-2 py-0.5 bg-amber-50 text-amber-800">
+                          {p.coachRead.redFlags.length} flag{p.coachRead.redFlags.length === 1 ? '' : 's'}
                         </span>
                       )}
                       {typeof p.coachRead.interestLevel === 'number' && (
@@ -4064,6 +4265,174 @@ function Lightbox({ photo, onClose }) {
         <img src={photo.dataUrl} alt="" className="max-w-full max-h-full object-contain" onClick={e => e.stopPropagation()} />
       </div>
     </div>
+  );
+}
+
+function Stars({ value, onChange, label }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-sm text-stone-600">{label}</span>
+      <div className="flex gap-0.5">
+        {[1, 2, 3, 4, 5].map(n => (
+          <button key={n} type="button" onClick={() => onChange(value === n ? 0 : n)} className="p-0.5">
+            <Star className={`w-5 h-5 ${n <= value ? 'fill-amber-500 text-amber-500' : 'text-stone-300'}`} />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MyReadCard({ myRead: raw, coachRead, onEdit }) {
+  const r = { ...emptyMyRead(), ...(raw || {}) };
+  const empty = myReadIsEmpty(r);
+  const hers = coachRead && typeof coachRead.interestLevel === 'number' ? coachRead.interestLevel : null;
+  const gap = (typeof r.interest === 'number' && hers !== null) ? r.interest - hers : null;
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-lg p-4 mb-4">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-semibold text-stone-700">Where you stand</h3>
+        <button onClick={onEdit} className="flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100">
+          <Pencil className="w-3.5 h-3.5" /> {empty ? 'Set it' : 'Edit'}
+        </button>
+      </div>
+
+      {empty ? (
+        <p className="text-sm text-stone-500">
+          The coach knows what she is doing but nothing about what you want. Two minutes here and the advice gets a lot sharper.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {r.intention && (
+            <div className="text-sm">
+              <span className="text-stone-500">Your intention: </span>
+              <span className="font-medium text-stone-900">{intentionLabel(r.intention)}</span>
+            </div>
+          )}
+
+          {typeof r.interest === 'number' && (
+            <div>
+              <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-stone-400 mb-1">
+                <span>Your interest</span>
+                <span className="text-stone-700 font-semibold text-sm">{r.interest}%</span>
+              </div>
+              <div className="h-2 bg-stone-100 rounded-full overflow-hidden">
+                <div className="h-full bg-stone-800" style={{ width: r.interest + '%' }} />
+              </div>
+              {gap !== null && (
+                <p className={`text-xs mt-1 ${Math.abs(gap) <= 15 ? 'text-stone-500' : gap > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                  {Math.abs(gap) <= 15
+                    ? 'Roughly level with her ' + hers + '%.'
+                    : gap > 0
+                      ? 'You are ' + gap + ' points keener than she is. That is the gap to close by doing less, not more.'
+                      : 'She is ' + Math.abs(gap) + ' points keener than you. Worth deciding what you actually want here.'}
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
+            {r.attraction > 0 && <div className="text-sm"><span className="text-stone-500">Attraction: </span>{r.attraction}/5</div>}
+            {r.enjoyment > 0 && <div className="text-sm"><span className="text-stone-500">Her company: </span>{r.enjoyment}/5</div>}
+            {r.travel && <div className="text-sm"><span className="text-stone-500">Travel: </span>{r.travel}</div>}
+            {r.schedules && <div className="text-sm col-span-2"><span className="text-stone-500">Schedules: </span>{r.schedules}</div>}
+            {r.lifeFit && <div className="text-sm col-span-2"><span className="text-stone-500">Fit with your life: </span>{r.lifeFit}</div>}
+          </div>
+
+          {r.dealbreakers && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-0.5">Dealbreakers</div>
+              <p className="text-sm text-stone-800">{r.dealbreakers}</p>
+            </div>
+          )}
+          {(r.flags || []).length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-1">Things you have clocked</div>
+              <div className="flex flex-wrap gap-1">
+                {r.flags.map((f, i) => (
+                  <span key={i} className="text-xs bg-amber-50 text-amber-800 border border-amber-200 rounded-full px-2.5 py-1">{f}</span>
+                ))}
+              </div>
+            </div>
+          )}
+          {r.notes && <p className="text-sm text-stone-700 whitespace-pre-line">{r.notes}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MyReadModal({ myRead, onCancel, onSave }) {
+  const [d, setD] = useState(() => ({ ...emptyMyRead(), ...(myRead || {}) }));
+  const set = (k, v) => setD(x => ({ ...x, [k]: v }));
+  const inputCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
+
+  return (
+    <ModalShell title="Where you stand" onCancel={onCancel} onSave={() => onSave(d)}>
+      <Field label="What do you want here?" hint="Be honest — the advice changes completely">
+        <div className="space-y-1.5">
+          {INTENTIONS.map(i => (
+            <button key={i.key} type="button" onClick={() => set('intention', i.key)}
+              className={`w-full text-left border rounded-md px-3 py-2 ${
+                d.intention === i.key ? 'border-stone-900 bg-stone-50' : 'border-stone-300 hover:bg-stone-50'
+              }`}>
+              <div className="text-sm font-medium">{i.label}</div>
+              <div className="text-xs text-stone-500">{i.blurb}</div>
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      <Field label="Your interest level" hint="0 = indifferent, 100 = all in">
+        <input type="range" min="0" max="100" step="5"
+          value={d.interest === null ? 50 : d.interest}
+          onChange={e => set('interest', Number(e.target.value))}
+          className="w-full" />
+        <div className="text-center text-sm font-semibold text-stone-800">
+          {d.interest === null ? 'Not set — drag to set' : d.interest + '%'}
+        </div>
+      </Field>
+
+      <div className="space-y-2">
+        <Stars label="Attraction" value={d.attraction} onChange={v => set('attraction', v)} />
+        <Stars label="How much you enjoy her company" value={d.enjoyment} onChange={v => set('enjoyment', v)} />
+      </div>
+
+      <Field label="Travel to see her">
+        <select value={d.travel} onChange={e => set('travel', e.target.value)} className={inputCls}>
+          <option value="">Not set</option>
+          {TRAVEL_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </Field>
+      <Field label="Do your schedules line up?">
+        <select value={d.schedules} onChange={e => set('schedules', e.target.value)} className={inputCls}>
+          <option value="">Not set</option>
+          {SCHEDULE_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </Field>
+      <Field label="Fit with the life you want">
+        <select value={d.lifeFit} onChange={e => set('lifeFit', e.target.value)} className={inputCls}>
+          <option value="">Not set</option>
+          {LIFE_FIT_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </Field>
+
+      <Field label="Dealbreakers" hint="Things that would end it, if they turned out to be true">
+        <textarea value={d.dealbreakers} onChange={e => set('dealbreakers', e.target.value)} rows={2}
+          onFocus={focusScroll} style={fieldScrollMargin} className={inputCls} />
+      </Field>
+      <Field label="Things you have clocked" hint="One per line — anything that gave you pause">
+        <textarea value={(d.flags || []).join('\n')} rows={3} onFocus={focusScroll} style={fieldScrollMargin}
+          onChange={e => set('flags', e.target.value.split('\n').map(t => t.trim()).filter(Boolean))}
+          placeholder={'Still talks about her ex\nCancelled twice'}
+          className={inputCls} />
+      </Field>
+      <Field label="Anything else">
+        <textarea value={d.notes} onChange={e => set('notes', e.target.value)} rows={3}
+          onFocus={focusScroll} style={fieldScrollMargin} className={inputCls} />
+      </Field>
+    </ModalShell>
   );
 }
 
@@ -4612,7 +4981,7 @@ function ContactNoteModal({ initial, onCancel, onSave }) {
             {CONTACT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         </Field>
-        <Field label="When" hint="Backdate freely">
+        <Field label="When">
           <input type="date" value={date} onChange={e => setDate(e.target.value)} className={inputCls} />
         </Field>
       </div>
@@ -5727,11 +6096,19 @@ function newPersonRecord(overrides = {}) {
     endDate: '',
     endNotes: '',
     lastContact: '',
+    relStart: '',
+    relEnd: '',
+    relType: '',
     profile: emptyProfile(),
+    myRead: emptyMyRead(),
     photos: [],
     profilePhotoId: null,
     conversationLog: [],
+    contactLog: [],
     dates: [],
+    dateSuggestions: [],
+    dismissedDateKeys: [],
+    conversationDays: [],
     ...overrides
   };
 }
@@ -5775,7 +6152,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-03 17:54';
+const BUILD_STAMP = '2026-08-03 18:40';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -6166,6 +6543,10 @@ function backfillPerson(p) {
     conversationDays: [],
     contactLog: [],
     ...p,
+    myRead: {
+      ...emptyMyRead(),
+      ...(p.myRead || {})
+    },
     profile: {
       ...emptyProfile(),
       ...(p.profile || {})
@@ -6219,7 +6600,11 @@ function migrateConversationLog(log) {
   out.sort((a, b) => (a.date || '9999-12-31').localeCompare(b.date || '9999-12-31'));
   return out;
 }
-const DAY_SUMMARY_PROMPT = `Below is one day's worth of an already-condensed chat log between the reader and a woman he is dating. "Me" is the reader, "She" is her. This is his own private record, so write it TO HIM in the second person — "you" and "she", never "he", "him" or "the user". Respond with ONLY a JSON object, no other text, no markdown fences:
+const DAY_SUMMARY_PROMPT = `Below is one day's worth of an already-condensed chat log between the reader and a woman he is dating. "Me" is the reader, "She" is her. This is his own private record, so write it TO HIM in the second person — "you" and "she", never "he", "him" or "the user".
+
+Ignore anything neither of you actually said: encryption notices, "missed voice call" rows, read receipts, app prompts and banners. Judge what mattered rather than listing turns — a fact about her life, a plan made or dropped, a change in warmth. A day of pleasantries deserves an empty facts array, not invented significance. Read tone as a person would: a one-word answer after a long silence is not warmth, whatever the words say.
+
+Respond with ONLY a JSON object, no other text, no markdown fences:
 {
 "summary": string — two or three sentences addressed to him on what this exchange was about and how it went between you and her. For example: "You opened about her hiking photo and she came back warmly, though she kept it brief." Never write about him in the third person.
 "facts": array of short strings — the things worth remembering, written to him: what she revealed about her life, work, family, plans or opinions; anything you agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, compliments and other small talk. Empty array if it was all small talk.
@@ -6307,6 +6692,80 @@ function daysFromFlatLog(log) {
     byDate[d].points.push(p);
   });
   return Object.values(byDate).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+}
+
+// ---------- Your side of it: intent, interest, logistics ----------
+// The app measured her closely and never asked what you actually want. Advice
+// without that is advice for a man with one setting.
+
+const INTENTIONS = [{
+  key: 'undecided',
+  label: 'Seeing what\'s there',
+  blurb: 'Early days, no decision made.'
+}, {
+  key: 'shortterm',
+  label: 'Short-term / fun',
+  blurb: 'Attraction is there, not looking to build anything.'
+}, {
+  key: 'ongoing_casual',
+  label: 'Ongoing but casual',
+  blurb: 'Happy seeing her regularly with no title on it.'
+}, {
+  key: 'open_serious',
+  label: 'Open to serious',
+  blurb: 'Would let it become something if it earns that.'
+}, {
+  key: 'longterm',
+  label: 'Looking for a partner',
+  blurb: 'This is the outcome you actually want.'
+}, {
+  key: 'friendship',
+  label: 'Friendship only',
+  blurb: 'You enjoy her, the romantic side is not on.'
+}, {
+  key: 'winding_down',
+  label: 'Winding it down',
+  blurb: 'On the way out, handling it decently.'
+}];
+const TRAVEL_OPTIONS = ['Under 20 min', '20–45 min', '45–90 min', 'Over 90 min'];
+const SCHEDULE_OPTIONS = ['Easy — we can meet most weeks', 'Workable with notice', 'Difficult — rarely line up'];
+const LIFE_FIT_OPTIONS = ['Fits my life well', 'Some friction', 'Pulling against my life'];
+function emptyMyRead() {
+  return {
+    interest: null,
+    // 0-100, your side, mirroring hers
+    intention: '',
+    attraction: 0,
+    // 1-5
+    enjoyment: 0,
+    // 1-5, how much you like her company
+    travel: '',
+    schedules: '',
+    lifeFit: '',
+    dealbreakers: '',
+    notes: '',
+    flags: [] // things you have clocked yourself
+  };
+}
+function intentionLabel(key) {
+  const found = INTENTIONS.find(i => i.key === key);
+  return found ? found.label : '';
+}
+function myReadIsEmpty(r) {
+  if (!r) return true;
+  return r.interest === null && !r.intention && !r.attraction && !r.enjoyment && !r.travel && !r.schedules && !r.lifeFit && !r.dealbreakers && !r.notes && !(r.flags || []).length;
+}
+
+// The gap between what she is giving and what you are giving is the whole game.
+function interestGap(person) {
+  const mine = person.myRead && person.myRead.interest;
+  const hers = person.coachRead && person.coachRead.interestLevel;
+  if (typeof mine !== 'number' || typeof hers !== 'number') return null;
+  return {
+    mine,
+    hers,
+    gap: mine - hers
+  };
 }
 
 // ---------- Relationship shape: span, classification, closure ----------
@@ -6503,6 +6962,15 @@ WORK OUT WHO IS WHO BEFORE YOU SUMMARISE. This is the part that goes wrong most 
 - In almost every app the user's own messages are aligned to the RIGHT in the app's accent colour; hers are on the LEFT in grey or white. Decide which side is which once, from the clearest evidence, then apply it consistently.
 - "Delivered", "Read" and "Sent" appear under the USER's messages; a small avatar usually sits beside HERS.
 - Sense-check: if a message answers a question, it was written by whoever did not ask it. If your attribution has one person asking and answering their own questions, flip it.
+
+IGNORE THE FURNITURE. A screenshot is full of things neither of you said. None of the following is ever a message, a fact, a session or an event, and none of it belongs in your output: the app's encryption notice ("Messages and calls are end-to-end encrypted"), disappearing-message notices, "You matched", "Say hi", blocked/report banners, delivery and read receipts, typing indicators, "Missed voice call" rows, date dividers themselves, unread-count separators, stickers and reaction badges, and any advertising or safety prompt the app inserts. If a whole session contains nothing but this, leave it out entirely.
+
+READ IT LIKE A PERSON, NOT A PARSER. You are summarising a conversation between two adults for the man's own private record. Judge what actually mattered:
+- Something is worth recording if it would matter to him in a month: a fact about her life, a plan made or dropped, a change in warmth, a boundary, a decision.
+- Small talk, weather, "how was your day", emoji, courtesy, and repeated logistics chatter about the same arrangement are not worth recording. Say what the exchange amounted to instead of listing every turn.
+- Where the two of you were clearly arranging something, record the arrangement and its outcome — not each message about it.
+- Read tone as a person would. Someone answering a question with one word after a long gap is not "chatting warmly", whatever the words say.
+- Never manufacture significance to fill the fields. An empty facts array is the right answer for a day of pleasantries.
 
 SPLIT THE CHAT INTO SESSIONS. A session is one continuous burst of conversation — normally everything under a single date or day divider, or a run of messages close together in time after a gap. Most screenshots contain several. Summarise each session separately, in order.
 
@@ -7439,6 +7907,24 @@ ACTIONS OUTWEIGH WORDS — BUT BEFORE A FIRST DATE, HER MESSAGE BEHAVIOUR IS THE
 - Bobby Rio: intrigue and playful tension. Don't hand over everything you think; leave her curious.
 - Orion Taragan: relaxed masculine frame — you are not auditioning, you are deciding whether she suits you.
 
+WHAT HE WANTS DECIDES WHAT GOOD LOOKS LIKE. You may be told his intention. Advice must follow it rather than assuming everyone is chasing a wife:
+- Seeing what's there — help him find out quickly: get her in front of him and see whether there is anything in the room.
+- Short-term / fun — do not push him toward commitment talk or long-horizon compatibility. Attraction and easy logistics matter; her views on children do not. Be straight about one thing: she is entitled to know it is not going somewhere, and stringing her along is beneath him.
+- Ongoing but casual — protect the rhythm. The risk is drift into an unspoken relationship neither of you chose.
+- Open to serious — test compatibility properly, and watch whether her behaviour is building toward something or coasting.
+- Looking for a partner — compatibility, availability and intent matter as much as attraction. Time spent on someone who cannot give him what he wants is the expensive mistake here.
+- Friendship only — no romantic coaching. Help him keep it clean and unambiguous.
+- Winding it down — help him end it kindly, clearly and once.
+If his intention and her behaviour are pulling in different directions, say so plainly. That mismatch is usually the whole story.
+
+INTEREST GAP. Where you have both numbers, compare them. Him well above her means he is doing the chasing — pull back, invest proportionally. Her well above him means he needs to decide honestly whether he is going anywhere with this, and not keep her warm out of vanity.
+
+LOGISTICS ARE PART OF COMPATIBILITY, not an afterthought. Ninety minutes of driving, schedules that never line up, or a life that pulls against his own will kill a promising thing regardless of chemistry — and are worth tolerating for something genuinely good. Weigh what he told you about travel, schedules and fit, and say when the practical picture undermines the romantic one.
+
+RED FLAGS. Name them when you see them, once, without lecturing. The standard ones: still hung up on an ex, cancelling repeatedly, hot then cold, only available at odd hours, evasive about her circumstances, money appearing early, pushing for private contact or platforms too fast, contempt about previous partners, love-bombing, inconsistencies in her story, or pressure that makes him uneasy. Include anything he has clocked himself and take it seriously — he was there. Flag it, say why it matters, and leave the decision to him. He is a grown man having a good time, not a case to be managed.
+
+TONE. Lighthearted and dry, like a sharp friend across a pint. He is in his fifties, enjoying his dating life, not out to hurt anyone and not in need of a lecture. No therapy-speak, no solemnity, no moralising — but do not soften a hard truth to be liked. A well-placed joke is fine; a wasted month is not.
+
 READ THE EVIDENCE PROPERLY. This is where a lazy read goes wrong:
 - The timeline you are given is the complete record. Do NOT invent events. If no date is listed as Completed, you have not met her. If a date is Cancelled, it did not happen. Never describe something as having gone well unless there is a written account saying so.
 - Your account of a date is HIS OWN WRITING and is the only record of what happened face to face. It outranks everything in the messages. Where his notes and the chat disagree, follow his notes and say so out loud.
@@ -7460,6 +7946,11 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 "interestLevel": integer 0-100 — for a live connection, her interest level now. For one that is over, her interest level at its highest point, which tells him what he was actually working with, judged from behaviour, not words. Be honest and specific rather than generous. If there is too little evidence, use 50 and say so in the status.
 "vibe": string — three to five words. For a live connection, the temperature now. For one that is over, what it amounted to, e.g. "Ran out of road", "She was never in it", "Good while it lasted", e.g. "High interest, moving fast", "Polite, low interest", "Cooling since the second date", "Too early to call".
 "status": string — 3-5 sentences addressed to him. If it is live, what is actually happening between you and her. If it is over, what happened and why, across the whole arc. Cite the concrete evidence: what you wrote after a date, who is doing the chasing, how long it has run, what has been agreed or dodged. Justify the interest level number. If the record is thin, say what is missing rather than filling the gap.
+"relationshipStart": string or null — "YYYY-MM", the month this began, judged from the record: the month you matched, or the first contact you can see. Null only if there is nothing to go on.
+"relationshipEnd": string or null — "YYYY-MM", the month it ended, but ONLY if it is genuinely over: she ended it, you ended it, or it has faded with no contact for months and nothing arranged. Null if it is still live, even if it is going badly. Do not close something down over a fortnight's quiet.
+"isOver": true or false — your judgement on whether this is finished. Be honest rather than hopeful: months of silence with no arrangement is finished, whatever either of you last said.
+"redFlags": array of objects {"flag": string (a few words), "why": string (one sentence on what it tends to mean), "severity": "note" or "watch" or "serious"} — anything worth him seeing, from her behaviour or from what he has clocked himself. Empty array if there is genuinely nothing. Do not invent flags to look thorough.
+"alignment": string or null — one sentence on whether what he wants and what she is doing point the same way. Null if you do not know his intention.
 "dateNotes": array of objects {"date": "YYYY-MM-DD", "read": string} — one entry for each COMPLETED date in the timeline, in date order. "read" is one or two sentences of YOUR interpretation of that particular meeting: what it tells you about her interest level and where things stood after it. Do not repeat your own notes back at you — you wrote them and can read them. Interpret them instead. If you wrote nothing about a date, say what that silence leaves unknown. Empty array if there are no completed dates.
 "recommendation": string — 2-4 sentences. If it is live, the single next move, why it works and what to avoid. If it is over, the lesson to carry forward: the pattern to watch for, the thing to do differently, or the standard to hold next time. Never suggest contacting a woman it is over with. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him plainly to stop investing.
 }
@@ -7559,6 +8050,29 @@ function buildCoachContext(person, brief) {
     lines.push(neverHappened + ' meeting(s) were floated in the chat but never happened — no agreed date, or it faded. ' + 'These do not count as dates, but they are strong evidence about her interest level: a woman with high interest ' + 'converts a suggestion into a fixed arrangement.');
   }
   lines.push('Meeting status: ' + (met ? 'you have met in person ' + met + ' time(s)' : everArranged ? 'a date has been arranged but none completed yet' : 'you have never arranged a date with her — the interest level here is provisional, judged on messages only') + (cancelled ? '; ' + cancelled + ' cancelled or no-show' : '') + '.');
+  const mine = {
+    ...emptyMyRead(),
+    ...(person.myRead || {})
+  };
+  if (!myReadIsEmpty(mine)) {
+    lines.push('--- YOUR SIDE (you told the app this yourself) ---');
+    if (mine.intention) {
+      const def = INTENTIONS.find(i => i.key === mine.intention);
+      lines.push('Your intention with her: ' + (def ? def.label + ' — ' + def.blurb : mine.intention));
+    }
+    if (typeof mine.interest === 'number') lines.push('Your own interest level: ' + mine.interest + '/100');
+    if (mine.attraction) lines.push('Attraction: ' + mine.attraction + '/5');
+    if (mine.enjoyment) lines.push('How much you enjoy her company: ' + mine.enjoyment + '/5');
+    if (mine.travel) lines.push('Travel to see her: ' + mine.travel);
+    if (mine.schedules) lines.push('Schedules: ' + mine.schedules);
+    if (mine.lifeFit) lines.push('Fit with the life you want: ' + mine.lifeFit);
+    if (mine.dealbreakers) lines.push('Your dealbreakers: ' + mine.dealbreakers);
+    (mine.flags || []).forEach(f => lines.push('You have already clocked: ' + f));
+    if (mine.notes) lines.push('Your own notes on where you stand: ' + mine.notes);
+    lines.push('--- end of your side ---');
+  } else {
+    lines.push('You have not recorded your own intention or interest level for her. Say plainly in the status that ' + 'you cannot judge whether to invest without knowing what he wants, and ask him to fill in "Where you stand".');
+  }
   const sig = conversationSignals(person);
   if (sig) {
     lines.push('Measured message signals: ' + sig.total + ' logged lines, ' + sig.herShare + '% of them hers, ' + 'exchanged across ' + sig.conversationDays + ' separate day(s)' + (sig.span !== null ? ' spanning ' + sig.span + ' days' : '') + '. You opened the conversation on ' + sig.heOpened + ' of those days, she opened on ' + sig.sheOpened + '. The last word was ' + (sig.lastSpeaker === 'him' ? 'yours' : 'hers') + '.');
@@ -7616,6 +8130,15 @@ async function generateCoachSummary(person, onProgress) {
     status: String(result.status || '').trim(),
     recommendation: String(result.recommendation || '').trim(),
     generatedAt: new Date().toISOString(),
+    redFlags: Array.isArray(result.redFlags) ? result.redFlags.map(f => ({
+      flag: String(f.flag || '').trim(),
+      why: String(f.why || '').trim(),
+      severity: ['note', 'watch', 'serious'].includes(f.severity) ? f.severity : 'note'
+    })).filter(f => f.flag) : [],
+    alignment: String(result.alignment || '').trim(),
+    relationshipStart: /^\d{4}-\d{2}$/.test(String(result.relationshipStart || '')) ? result.relationshipStart : '',
+    relationshipEnd: /^\d{4}-\d{2}$/.test(String(result.relationshipEnd || '')) ? result.relationshipEnd : '',
+    isOver: result.isOver === true,
     dateNotes: Array.isArray(result.dateNotes) ? result.dateNotes.map(d => ({
       date: String(d.date || '').slice(0, 10),
       read: String(d.read || '').trim()
@@ -7712,7 +8235,8 @@ function StatusPanel({
   busy,
   error,
   onRefresh,
-  onOpenSettings
+  onOpenSettings,
+  myRead
 }) {
   const needsKey = !Local.get('anthropic-api-key');
   return /*#__PURE__*/React.createElement("div", {
@@ -7734,7 +8258,9 @@ function StatusPanel({
     onClick: onRefresh,
     disabled: busy,
     className: "text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100 disabled:opacity-60"
-  }, busy ? 'Reading…' : read ? 'Refresh' : 'Get a read')), needsKey && !error && /*#__PURE__*/React.createElement("p", {
+  }, busy ? 'Reading…' : read ? 'Refresh' : 'Get a read')), !needsKey && !error && myReadIsEmpty(myRead) && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-amber-700 mb-2"
+  }, "Fill in \"Where you stand\" below first — without your intention the advice is generic."), needsKey && !error && /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-500"
   }, "A read needs an Anthropic API key. It lives on this device only, so each browser you use needs it entered once."), error && /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-red-700"
@@ -7753,13 +8279,26 @@ function StatusPanel({
     className: "text-xs text-amber-700"
   }, "This read predates the interest-level score. Refresh to get one."), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-800"
-  }, read.status), /*#__PURE__*/React.createElement("div", {
+  }, read.status), read.alignment && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-700 bg-stone-50 border border-stone-200 rounded-md px-2.5 py-2"
+  }, read.alignment), /*#__PURE__*/React.createElement("div", {
     className: "border-l-2 border-stone-900 pl-2.5"
   }, /*#__PURE__*/React.createElement("div", {
     className: "text-[10px] uppercase tracking-wide text-stone-400 mb-0.5"
   }, "Next move"), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-800"
-  }, read.recommendation)), /*#__PURE__*/React.createElement("p", {
+  }, read.recommendation)), (read.redFlags || []).length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "text-[10px] uppercase tracking-wide text-stone-400 mb-1"
+  }, "Worth knowing — your call"), /*#__PURE__*/React.createElement("div", {
+    className: "space-y-1.5"
+  }, read.redFlags.map((f, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    className: `rounded-md px-2.5 py-2 border ${f.severity === 'serious' ? 'bg-red-50 border-red-200' : f.severity === 'watch' ? 'bg-amber-50 border-amber-200' : 'bg-stone-50 border-stone-200'}`
+  }, /*#__PURE__*/React.createElement("div", {
+    className: `text-sm font-medium ${f.severity === 'serious' ? 'text-red-800' : f.severity === 'watch' ? 'text-amber-900' : 'text-stone-800'}`
+  }, f.flag), f.why && /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-stone-600 mt-0.5"
+  }, f.why))))), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-stone-400"
   }, "Read taken ", formatReadStamp(read.generatedAt), ".")));
 }
@@ -8082,6 +8621,7 @@ function RelationshipTracker() {
   const [stageFilter, setStageFilter] = useState('Active');
   const [showInsights, setShowInsights] = useState(false);
   const [showProfileEdit, setShowProfileEdit] = useState(false);
+  const [showMyRead, setShowMyRead] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   const [chatImport, setChatImport] = useState(null);
   const [notice, setNotice] = useState('');
@@ -8339,11 +8879,26 @@ function RelationshipTracker() {
     setCoachError('');
     try {
       const read = await generateCoachSummary(selected, msg => setCoachError(msg));
-      await persist(peopleRef.current.map(p => p.id === selected.id ? {
-        ...p,
-        coachRead: read
-      } : p));
+      await persist(peopleRef.current.map(p => {
+        if (p.id !== selected.id) return p;
+        const next = {
+          ...p,
+          coachRead: read
+        };
+        // Fill the period from the read, but never overwrite what you entered.
+        if (!p.relStart && read.relationshipStart) next.relStart = read.relationshipStart;
+        if (!p.relEnd && read.relationshipEnd && read.isOver) {
+          next.relEnd = read.relationshipEnd;
+          if (p.stage !== 'Ended') {
+            next.stage = 'Ended';
+            next.endDate = p.endDate || read.relationshipEnd + '-01';
+            next.endReason = p.endReason || 'Faded out';
+          }
+        }
+        return next;
+      }));
       setCoachError('');
+      if (read.isOver && !selected.relEnd) setNotice('Marked as ended in ' + read.relationshipEnd + ' — change it in Edit if that is wrong.');
     } catch (e) {
       setCoachError(friendlyExtractError(e) || 'Could not get a read right now.');
     }
@@ -8849,7 +9404,30 @@ function RelationshipTracker() {
       className: `text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${stageBadgeClass[selected.stage]}`
     }, selected.stage)), /*#__PURE__*/React.createElement("div", {
       className: "mt-1 text-sm text-stone-600 space-y-0.5"
-    }, selected.meetingChannel && /*#__PURE__*/React.createElement("div", {
+    }, (() => {
+      const start = relStartYm(selected),
+        end = relEndYm(selected);
+      if (!start) return null;
+      const span = relSpanMonths(selected);
+      const closure = closureState(selected);
+      const fmt = m => m ? new Date(m + '-01T00:00:00').toLocaleDateString('en-IE', {
+        month: 'short',
+        year: 'numeric'
+      }) : '';
+      return /*#__PURE__*/React.createElement("div", {
+        className: "flex items-center gap-1.5 flex-wrap"
+      }, /*#__PURE__*/React.createElement(Calendar, {
+        className: "w-3.5 h-3.5 shrink-0"
+      }), /*#__PURE__*/React.createElement("span", {
+        className: "font-medium text-stone-800"
+      }, fmt(start), " – ", end ? fmt(end) : 'now'), span !== null && /*#__PURE__*/React.createElement("span", {
+        className: "text-stone-500"
+      }, "· ", formatSpan(span)), /*#__PURE__*/React.createElement("span", {
+        className: "text-[10px] uppercase tracking-wide bg-stone-100 text-stone-700 rounded-full px-2 py-0.5"
+      }, classifyRelationship(selected)), closure.closed && /*#__PURE__*/React.createElement("span", {
+        className: "text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5"
+      }, closure.label));
+    })(), selected.meetingChannel && /*#__PURE__*/React.createElement("div", {
       className: "flex items-center gap-1.5"
     }, /*#__PURE__*/React.createElement(MessageCircle, {
       className: "w-3.5 h-3.5"
@@ -8873,28 +9451,7 @@ function RelationshipTracker() {
       className: "flex items-center gap-1.5 font-medium text-stone-800"
     }, /*#__PURE__*/React.createElement(Flag, {
       className: "w-3.5 h-3.5"
-    }), " ", selected.endReason || 'Ended'), selected.endDate && /*#__PURE__*/React.createElement("div", null, "Ended ", selected.endDate), (() => {
-      const span = relSpanMonths(selected);
-      const closure = closureState(selected);
-      const start = relStartYm(selected),
-        end = relEndYm(selected);
-      if (!start) return null;
-      const fmt = m => m ? new Date(m + '-01T00:00:00').toLocaleDateString('en-IE', {
-        month: 'short',
-        year: 'numeric'
-      }) : '';
-      return /*#__PURE__*/React.createElement("div", {
-        className: "flex items-center gap-1.5 flex-wrap mt-0.5"
-      }, /*#__PURE__*/React.createElement("span", {
-        className: "text-stone-600"
-      }, fmt(start), end ? ' – ' + fmt(end) : ' – now', span !== null ? ' · ' + formatSpan(span) : ''), /*#__PURE__*/React.createElement("span", {
-        className: "text-[10px] uppercase tracking-wide bg-stone-100 text-stone-700 rounded-full px-2 py-0.5"
-      }, classifyRelationship(selected)), closure.closed && /*#__PURE__*/React.createElement("span", {
-        className: "text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5"
-      }, closure.label));
-    })(), selected.endNotes && /*#__PURE__*/React.createElement("div", {
-      className: "mt-1"
-    }, selected.endNotes)))), /*#__PURE__*/React.createElement("div", {
+    }), " ", selected.endReason || 'Ended'), selected.endDate && /*#__PURE__*/React.createElement("div", null, "Ended ", selected.endDate)))), /*#__PURE__*/React.createElement("div", {
       className: "flex flex-col gap-1 shrink-0"
     }, /*#__PURE__*/React.createElement("button", {
       onClick: () => startEditPerson(selected),
@@ -8935,7 +9492,12 @@ function RelationshipTracker() {
       busy: coachBusy,
       error: coachError,
       onRefresh: refreshCoachRead,
-      onOpenSettings: () => setShowSettings(true)
+      onOpenSettings: () => setShowSettings(true),
+      myRead: selected.myRead
+    }), /*#__PURE__*/React.createElement(MyReadCard, {
+      myRead: selected.myRead,
+      coachRead: selected.coachRead,
+      onEdit: () => setShowMyRead(true)
     }), /*#__PURE__*/React.createElement(ProfileCard, {
       profile: selected.profile || emptyProfile(),
       onEdit: () => setShowProfileEdit(true)
@@ -9051,6 +9613,16 @@ function RelationshipTracker() {
       initial: contactNote,
       onCancel: () => setContactNote(null),
       onSave: saveContactNote
+    }), showMyRead && /*#__PURE__*/React.createElement(MyReadModal, {
+      myRead: selected.myRead,
+      onCancel: () => setShowMyRead(false),
+      onSave: async draft => {
+        await persist(peopleRef.current.map(p => p.id === selected.id ? {
+          ...p,
+          myRead: draft
+        } : p));
+        setShowMyRead(false);
+      }
     }), showProfileEdit && /*#__PURE__*/React.createElement(ProfileEditModal, {
       profile: selected.profile || emptyProfile(),
       onCancel: () => setShowProfileEdit(false),
@@ -9293,7 +9865,11 @@ function RelationshipTracker() {
       className: "flex items-center gap-2 flex-wrap"
     }, p.coachRead.vibe && /*#__PURE__*/React.createElement("span", {
       className: "text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5"
-    }, p.coachRead.vibe), typeof p.coachRead.interestLevel === 'number' && /*#__PURE__*/React.createElement("span", {
+    }, p.coachRead.vibe), p.myRead && p.myRead.intention && /*#__PURE__*/React.createElement("span", {
+      className: "text-[10px] uppercase tracking-wide bg-stone-100 text-stone-600 rounded-full px-2 py-0.5"
+    }, intentionLabel(p.myRead.intention)), (p.coachRead.redFlags || []).length > 0 && /*#__PURE__*/React.createElement("span", {
+      className: "text-[10px] font-semibold rounded-full px-2 py-0.5 bg-amber-50 text-amber-800"
+    }, p.coachRead.redFlags.length, " flag", p.coachRead.redFlags.length === 1 ? '' : 's'), typeof p.coachRead.interestLevel === 'number' && /*#__PURE__*/React.createElement("span", {
       className: `text-[10px] font-semibold rounded-full px-2 py-0.5 ${p.coachRead.interestLevel >= 70 ? 'bg-emerald-50 text-emerald-800' : p.coachRead.interestLevel >= 51 ? 'bg-amber-50 text-amber-800' : 'bg-red-50 text-red-700'}`
     }, "Interest ", p.coachRead.interestLevel, "%"), readIsStale(p) && /*#__PURE__*/React.createElement("span", {
       className: "text-[10px] uppercase tracking-wide text-amber-700"
@@ -9972,6 +10548,229 @@ function Lightbox({
     onClick: e => e.stopPropagation()
   })));
 }
+function Stars({
+  value,
+  onChange,
+  label
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between gap-2"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-sm text-stone-600"
+  }, label), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-0.5"
+  }, [1, 2, 3, 4, 5].map(n => /*#__PURE__*/React.createElement("button", {
+    key: n,
+    type: "button",
+    onClick: () => onChange(value === n ? 0 : n),
+    className: "p-0.5"
+  }, /*#__PURE__*/React.createElement(Star, {
+    className: `w-5 h-5 ${n <= value ? 'fill-amber-500 text-amber-500' : 'text-stone-300'}`
+  })))));
+}
+function MyReadCard({
+  myRead: raw,
+  coachRead,
+  onEdit
+}) {
+  const r = {
+    ...emptyMyRead(),
+    ...(raw || {})
+  };
+  const empty = myReadIsEmpty(r);
+  const hers = coachRead && typeof coachRead.interestLevel === 'number' ? coachRead.interestLevel : null;
+  const gap = typeof r.interest === 'number' && hers !== null ? r.interest - hers : null;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "bg-white border border-stone-200 rounded-lg p-4 mb-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-2"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "text-sm font-semibold text-stone-700"
+  }, "Where you stand"), /*#__PURE__*/React.createElement("button", {
+    onClick: onEdit,
+    className: "flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100"
+  }, /*#__PURE__*/React.createElement(Pencil, {
+    className: "w-3.5 h-3.5"
+  }), " ", empty ? 'Set it' : 'Edit')), empty ? /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-500"
+  }, "The coach knows what she is doing but nothing about what you want. Two minutes here and the advice gets a lot sharper.") : /*#__PURE__*/React.createElement("div", {
+    className: "space-y-2"
+  }, r.intention && /*#__PURE__*/React.createElement("div", {
+    className: "text-sm"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-stone-500"
+  }, "Your intention: "), /*#__PURE__*/React.createElement("span", {
+    className: "font-medium text-stone-900"
+  }, intentionLabel(r.intention))), typeof r.interest === 'number' && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between text-[10px] uppercase tracking-wide text-stone-400 mb-1"
+  }, /*#__PURE__*/React.createElement("span", null, "Your interest"), /*#__PURE__*/React.createElement("span", {
+    className: "text-stone-700 font-semibold text-sm"
+  }, r.interest, "%")), /*#__PURE__*/React.createElement("div", {
+    className: "h-2 bg-stone-100 rounded-full overflow-hidden"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "h-full bg-stone-800",
+    style: {
+      width: r.interest + '%'
+    }
+  })), gap !== null && /*#__PURE__*/React.createElement("p", {
+    className: `text-xs mt-1 ${Math.abs(gap) <= 15 ? 'text-stone-500' : gap > 0 ? 'text-amber-700' : 'text-emerald-700'}`
+  }, Math.abs(gap) <= 15 ? 'Roughly level with her ' + hers + '%.' : gap > 0 ? 'You are ' + gap + ' points keener than she is. That is the gap to close by doing less, not more.' : 'She is ' + Math.abs(gap) + ' points keener than you. Worth deciding what you actually want here.')), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-x-3 gap-y-1 pt-1"
+  }, r.attraction > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "text-sm"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-stone-500"
+  }, "Attraction: "), r.attraction, "/5"), r.enjoyment > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "text-sm"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-stone-500"
+  }, "Her company: "), r.enjoyment, "/5"), r.travel && /*#__PURE__*/React.createElement("div", {
+    className: "text-sm"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-stone-500"
+  }, "Travel: "), r.travel), r.schedules && /*#__PURE__*/React.createElement("div", {
+    className: "text-sm col-span-2"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-stone-500"
+  }, "Schedules: "), r.schedules), r.lifeFit && /*#__PURE__*/React.createElement("div", {
+    className: "text-sm col-span-2"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-stone-500"
+  }, "Fit with your life: "), r.lifeFit)), r.dealbreakers && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "text-[10px] uppercase tracking-wide text-stone-400 mb-0.5"
+  }, "Dealbreakers"), /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-800"
+  }, r.dealbreakers)), (r.flags || []).length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "text-[10px] uppercase tracking-wide text-stone-400 mb-1"
+  }, "Things you have clocked"), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-wrap gap-1"
+  }, r.flags.map((f, i) => /*#__PURE__*/React.createElement("span", {
+    key: i,
+    className: "text-xs bg-amber-50 text-amber-800 border border-amber-200 rounded-full px-2.5 py-1"
+  }, f)))), r.notes && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-700 whitespace-pre-line"
+  }, r.notes)));
+}
+function MyReadModal({
+  myRead,
+  onCancel,
+  onSave
+}) {
+  const [d, setD] = useState(() => ({
+    ...emptyMyRead(),
+    ...(myRead || {})
+  }));
+  const set = (k, v) => setD(x => ({
+    ...x,
+    [k]: v
+  }));
+  const inputCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
+  return /*#__PURE__*/React.createElement(ModalShell, {
+    title: "Where you stand",
+    onCancel: onCancel,
+    onSave: () => onSave(d)
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "What do you want here?",
+    hint: "Be honest — the advice changes completely"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "space-y-1.5"
+  }, INTENTIONS.map(i => /*#__PURE__*/React.createElement("button", {
+    key: i.key,
+    type: "button",
+    onClick: () => set('intention', i.key),
+    className: `w-full text-left border rounded-md px-3 py-2 ${d.intention === i.key ? 'border-stone-900 bg-stone-50' : 'border-stone-300 hover:bg-stone-50'}`
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-sm font-medium"
+  }, i.label), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-stone-500"
+  }, i.blurb))))), /*#__PURE__*/React.createElement(Field, {
+    label: "Your interest level",
+    hint: "0 = indifferent, 100 = all in"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "range",
+    min: "0",
+    max: "100",
+    step: "5",
+    value: d.interest === null ? 50 : d.interest,
+    onChange: e => set('interest', Number(e.target.value)),
+    className: "w-full"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "text-center text-sm font-semibold text-stone-800"
+  }, d.interest === null ? 'Not set — drag to set' : d.interest + '%')), /*#__PURE__*/React.createElement("div", {
+    className: "space-y-2"
+  }, /*#__PURE__*/React.createElement(Stars, {
+    label: "Attraction",
+    value: d.attraction,
+    onChange: v => set('attraction', v)
+  }), /*#__PURE__*/React.createElement(Stars, {
+    label: "How much you enjoy her company",
+    value: d.enjoyment,
+    onChange: v => set('enjoyment', v)
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Travel to see her"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: d.travel,
+    onChange: e => set('travel', e.target.value),
+    className: inputCls
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Not set"), TRAVEL_OPTIONS.map(t => /*#__PURE__*/React.createElement("option", {
+    key: t,
+    value: t
+  }, t)))), /*#__PURE__*/React.createElement(Field, {
+    label: "Do your schedules line up?"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: d.schedules,
+    onChange: e => set('schedules', e.target.value),
+    className: inputCls
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Not set"), SCHEDULE_OPTIONS.map(t => /*#__PURE__*/React.createElement("option", {
+    key: t,
+    value: t
+  }, t)))), /*#__PURE__*/React.createElement(Field, {
+    label: "Fit with the life you want"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: d.lifeFit,
+    onChange: e => set('lifeFit', e.target.value),
+    className: inputCls
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Not set"), LIFE_FIT_OPTIONS.map(t => /*#__PURE__*/React.createElement("option", {
+    key: t,
+    value: t
+  }, t)))), /*#__PURE__*/React.createElement(Field, {
+    label: "Dealbreakers",
+    hint: "Things that would end it, if they turned out to be true"
+  }, /*#__PURE__*/React.createElement("textarea", {
+    value: d.dealbreakers,
+    onChange: e => set('dealbreakers', e.target.value),
+    rows: 2,
+    onFocus: focusScroll,
+    style: fieldScrollMargin,
+    className: inputCls
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Things you have clocked",
+    hint: "One per line — anything that gave you pause"
+  }, /*#__PURE__*/React.createElement("textarea", {
+    value: (d.flags || []).join('\n'),
+    rows: 3,
+    onFocus: focusScroll,
+    style: fieldScrollMargin,
+    onChange: e => set('flags', e.target.value.split('\n').map(t => t.trim()).filter(Boolean)),
+    placeholder: 'Still talks about her ex\nCancelled twice',
+    className: inputCls
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Anything else"
+  }, /*#__PURE__*/React.createElement("textarea", {
+    value: d.notes,
+    onChange: e => set('notes', e.target.value),
+    rows: 3,
+    onFocus: focusScroll,
+    style: fieldScrollMargin,
+    className: inputCls
+  })));
+}
 
 // ---------- Structured profile display / review / edit ----------
 
@@ -10639,8 +11438,7 @@ function ContactNoteModal({
     key: t,
     value: t
   }, t)))), /*#__PURE__*/React.createElement(Field, {
-    label: "When",
-    hint: "Backdate freely"
+    label: "When"
   }, /*#__PURE__*/React.createElement("input", {
     type: "date",
     value: date,
