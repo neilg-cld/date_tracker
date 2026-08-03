@@ -398,7 +398,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-03 18:40';
+const BUILD_STAMP = '2026-08-03 19:35';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -481,6 +481,39 @@ async function ghPull() {
     content = await raw.text();
   }
   if (!content) return null;
+  const parsed = JSON.parse(content);
+  return {
+    updatedAt: parsed.updatedAt || '',
+    device: parsed.device || '',
+    people: Array.isArray(parsed.people) ? parsed.people.map(backfillPerson) : [],
+  };
+}
+
+// Every save to the Gist is a revision GitHub keeps. That is the safety net when
+// a sync goes the wrong way.
+async function ghHistory() {
+  const id = Sync.gistId();
+  if (!id) throw new Error('Not connected to sync.');
+  const commits = await ghFetch('/gists/' + id + '/commits?per_page=40');
+  return (commits || []).map(c => ({
+    version: c.version,
+    at: c.committed_at,
+    changes: c.change_status || {},
+  }));
+}
+
+async function ghRevision(version) {
+  const id = Sync.gistId();
+  if (!id) throw new Error('Not connected to sync.');
+  const gist = await ghFetch('/gists/' + id + '/' + version);
+  const file = gist.files && gist.files[GIST_FILE];
+  if (!file) throw new Error('That revision has no data file.');
+  let content = file.content;
+  if (file.truncated && file.raw_url) {
+    const raw = await fetch(file.raw_url);
+    if (!raw.ok) throw new Error('Could not download that revision.');
+    content = await raw.text();
+  }
   const parsed = JSON.parse(content);
   return {
     updatedAt: parsed.updatedAt || '',
@@ -715,6 +748,7 @@ function migrateFromFlatList(flat) {
 // Backfill fields added after initial release, for people saved by an earlier version.
 function backfillPerson(p) {
   const out = {
+    id: (p && p.id) || 'p-' + Date.now() + Math.random().toString(36).slice(2, 8),
     photos: [], profilePhotoId: null, conversationLog: [], phone: '', lastContact: '',
     dateSuggestions: [], dismissedDateKeys: [], conversationDays: [], contactLog: [],
     ...p,
@@ -828,6 +862,142 @@ function daysFromFlatLog(log) {
     byDate[d].points.push(p);
   });
   return Object.values(byDate).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+}
+
+// ---------- Merging two copies ----------
+// Editing on two devices between syncs leaves two partly-right copies. Replacing
+// one with the other throws work away, so this folds them together instead.
+
+function personKey(p) {
+  return normaliseMsg(p.name || '');
+}
+
+function pickLater(a, b) {
+  const ra = activityRank(a) || '', rb = activityRank(b) || '';
+  return rb > ra ? b : a;
+}
+
+function unionBy(listA, listB, keyOf) {
+  const out = [];
+  const seen = new Set();
+  [...(listA || []), ...(listB || [])].forEach(item => {
+    if (!item) return;
+    const k = keyOf(item);
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    out.push(item);
+  });
+  return out;
+}
+
+function mergeDays(daysA, daysB) {
+  const byDate = {};
+  [...(daysA || []), ...(daysB || [])].forEach(d => {
+    if (!d) return;
+    const key = d.date || 'undated';
+    if (!byDate[key]) {
+      byDate[key] = { ...d, facts: [...(d.facts || [])], points: [...(d.points || [])] };
+      return;
+    }
+    const t = byDate[key];
+    if (d.summary && !normaliseMsg(t.summary || '').includes(normaliseMsg(d.summary).slice(0, 40))) {
+      t.summary = ((t.summary || '') + ' ' + d.summary).trim();
+    }
+    (d.facts || []).forEach(f => {
+      if (!t.facts.some(x => normaliseMsg(x) === normaliseMsg(f))) t.facts.push(f);
+    });
+    (d.points || []).forEach(pt => {
+      if (!t.points.some(x => pointKey(x) === pointKey(pt))) t.points.push(pt);
+    });
+  });
+  return Object.values(byDate).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+}
+
+function mergeMyRead(a, b) {
+  const ra = { ...emptyMyRead(), ...(a || {}) }, rb = { ...emptyMyRead(), ...(b || {}) };
+  const out = { ...ra };
+  Object.keys(emptyMyRead()).forEach(k => {
+    if (k === 'flags') return;
+    const av = ra[k], bv = rb[k];
+    const aEmpty = av === null || av === '' || av === 0;
+    if (aEmpty && !(bv === null || bv === '' || bv === 0)) out[k] = bv;
+  });
+  out.flags = unionBy(ra.flags || [], rb.flags || [], f => normaliseMsg(f));
+  return out;
+}
+
+function mergePerson(a, b) {
+  const base = pickLater(a, b);          // the more recently touched copy leads
+  const other = base === a ? b : a;
+  const out = { ...other, ...base };
+
+  // Scalars: keep whatever is filled in, preferring the leading copy.
+  ['meetingChannel', 'phone', 'notes', 'endReason', 'endDate', 'endNotes',
+   'relStart', 'relEnd', 'relType', 'chatSummary'].forEach(k => {
+    if (!out[k] && other[k]) out[k] = other[k];
+  });
+  out.dateMet = [a.dateMet, b.dateMet].filter(Boolean).sort()[0] || '';
+  out.lastContact = [a.lastContact, b.lastContact].filter(Boolean).sort().slice(-1)[0] || '';
+
+  out.profile = { ...emptyProfile(), ...(other.profile || {}), ...(base.profile || {}) };
+  PROFILE_FIELDS.forEach(([k]) => { if (!out.profile[k] && other.profile && other.profile[k]) out.profile[k] = other.profile[k]; });
+  if (!out.profile.bio && other.profile && other.profile.bio) out.profile.bio = other.profile.bio;
+  out.profile.interests = unionBy((a.profile || {}).interests, (b.profile || {}).interests, x => normaliseMsg(x));
+  out.profile.socials = unionBy((a.profile || {}).socials, (b.profile || {}).socials, x => normaliseMsg(x));
+  out.profile.prompts = unionBy((a.profile || {}).prompts, (b.profile || {}).prompts,
+    x => normaliseMsg(x.question) + '|' + normaliseMsg(x.answer));
+
+  out.conversationDays = mergeDays(a.conversationDays, b.conversationDays);
+  out.conversationLog = flattenDays(out.conversationDays);
+  out.dates = unionBy(a.dates, b.dates, d => d.id || (normaliseMsg(d.date) + '|' + normaliseMsg(d.location)))
+    .sort((x, y) => (x.date || '').localeCompare(y.date || ''));
+  out.contactLog = unionBy(a.contactLog, b.contactLog, c => c.id || (normaliseMsg(c.date) + '|' + normaliseMsg(c.text)))
+    .sort((x, y) => (x.date || '').localeCompare(y.date || ''));
+  out.photos = unionBy(a.photos, b.photos, ph => ph.id);
+  out.dateSuggestions = unionBy(a.dateSuggestions, b.dateSuggestions, x => x.key);
+  out.dismissedDateKeys = unionBy(a.dismissedDateKeys, b.dismissedDateKeys, x => x);
+  out.dateSuggestions = out.dateSuggestions.filter(x => !out.dismissedDateKeys.includes(x.key));
+  out.myRead = mergeMyRead(base.myRead, other.myRead);
+
+  // Keep whichever read was taken later.
+  const ga = (a.coachRead && a.coachRead.generatedAt) || '';
+  const gb = (b.coachRead && b.coachRead.generatedAt) || '';
+  out.coachRead = gb > ga ? b.coachRead : (a.coachRead || b.coachRead || null);
+
+  return backfillPerson(out);
+}
+
+// Fold an imported list into the current one, reporting what happened.
+function mergePeopleLists(current, incoming) {
+  const result = (current || []).map(p => ({ ...p }));
+  const index = new Map();
+  result.forEach((p, i) => {
+    if (p.id) index.set('id:' + p.id, i);
+    const nk = personKey(p);
+    if (nk) index.set('name:' + nk, i);
+  });
+
+  let merged = 0, added = 0;
+  const mergedNames = [], addedNames = [];
+  (incoming || []).forEach(inc => {
+    if (!inc || !inc.name) return;
+    const byId = inc.id ? index.get('id:' + inc.id) : undefined;
+    const nk = personKey(inc);
+    let i = byId !== undefined ? byId : (nk ? index.get('name:' + nk) : undefined);
+    if (i === undefined) {
+      const added2 = backfillPerson(inc);
+      result.push(added2);
+      if (added2.id) index.set('id:' + added2.id, result.length - 1);
+      if (nk) index.set('name:' + nk, result.length - 1);
+      added += 1;
+      addedNames.push(inc.name);
+    } else {
+      result[i] = mergePerson(result[i], backfillPerson(inc));
+      merged += 1;
+      mergedNames.push(result[i].name);
+    }
+  });
+  return { people: result, merged, added, mergedNames, addedNames };
 }
 
 // ---------- Your side of it: intent, interest, logistics ----------
@@ -2763,20 +2933,38 @@ function RelationshipTracker() {
     }
   }
 
-  async function resolveConflict(takeRemote) {
+  async function resolveConflict(mode) {
     const remote = syncConflict && syncConflict.remote;
     setSyncConflict(null);
     if (!remote) return;
-    if (takeRemote) {
+    if (mode === 'merge') {
+      const merged = mergePeopleLists(peopleRef.current, remote.people).people;
+      setPeople(merged);
+      await DataStore.set('people-list', JSON.stringify(merged));
+      await pushToCloud(merged);
+      setNotice('Combined both copies — ' + merged.length + ' people.');
+      return;
+    }
+    if (mode === 'remote') {
       setPeople(remote.people);
       await DataStore.set('people-list', JSON.stringify(remote.people));
       Sync.markPulled(remote.updatedAt);
       setSyncState({ status: 'idle', last: remote.updatedAt, error: '' });
-      setNotice('Replaced with the synced copy (' + remote.people.length + ' people).');
-    } else {
-      await pushToCloud(peopleRef.current);
-      setNotice('Kept this device and overwrote the synced copy.');
+      setNotice('Using the synced copy (' + remote.people.length + ' people).');
+      return;
     }
+    await pushToCloud(peopleRef.current);
+    setNotice('Kept this device and overwrote the synced copy.');
+  }
+
+  async function restoreFromHistory(incoming, mode) {
+    const merged = mode === 'replace'
+      ? incoming
+      : mergePeopleLists(peopleRef.current, incoming).people;
+    await persist(merged);
+    setNotice(mode === 'replace'
+      ? 'Rolled back to that version — ' + merged.length + ' people.'
+      : 'Merged that version in — ' + merged.length + ' people now.');
   }
 
   async function connectSync(token) {
@@ -3551,8 +3739,10 @@ function RelationshipTracker() {
         {syncConflict && (
         <SyncConflictModal
           info={syncConflict}
-          onKeepLocal={() => resolveConflict(false)}
-          onTakeRemote={() => resolveConflict(true)}
+          onKeepLocal={() => resolveConflict('local')}
+          onTakeRemote={() => resolveConflict('remote')}
+          onMerge={() => resolveConflict('merge')}
+          onCancel={() => setSyncConflict(null)}
         />
       )}
       {notice && <NoticeToast message={notice} onClose={() => setNotice('')} />}
@@ -3594,6 +3784,10 @@ function RelationshipTracker() {
             onSyncNow={() => pullFromCloud(false)}
             onExported={(d) => { setExportStamp(d); setBackupNag(false); }}
             onLockChanged={() => setLockVersion(v => v + 1)}
+            onRestoreMerge={(ppl) => restoreFromHistory(ppl, 'merge')}
+            onRestoreReplace={(ppl) => restoreFromHistory(ppl, 'replace')}
+            onRestoreMerge={(ppl) => restoreFromHistory(ppl, 'merge')}
+            onRestoreReplace={(ppl) => restoreFromHistory(ppl, 'replace')}
             lockVersion={lockVersion}
           />
         )}
@@ -3867,6 +4061,8 @@ function RelationshipTracker() {
           onSyncNow={() => pullFromCloud(false)}
           onExported={(d) => { setExportStamp(d); setBackupNag(false); }}
           onLockChanged={() => setLockVersion(v => v + 1)}
+          onRestoreMerge={(ppl) => restoreFromHistory(ppl, 'merge')}
+          onRestoreReplace={(ppl) => restoreFromHistory(ppl, 'replace')}
           lockVersion={lockVersion}
         />
       )}
@@ -5498,7 +5694,7 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose }) {
   );
 }
 
-function SyncPanel({ syncState: rawState, onConnect, onDisconnect, onSyncNow }) {
+function SyncPanel({ syncState: rawState, onConnect, onDisconnect, onSyncNow, onRestoreMerge, onRestoreReplace }) {
   const syncState = rawState || { status: Sync.configured() ? 'idle' : 'off', last: Sync.lastPull(), error: '' };
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
@@ -5552,13 +5748,93 @@ function SyncPanel({ syncState: rawState, onConnect, onDisconnect, onSyncNow }) 
               className="flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">Turn off here</button>
           </div>
           <p className="text-[11px] text-stone-400 mt-1">Changes upload a few seconds after you make them, and download when the app opens.</p>
+          <RestorePanel onMerge={onRestoreMerge} onReplace={onRestoreReplace} />
         </>
       )}
     </div>
   );
 }
 
-function SyncConflictModal({ info, onKeepLocal, onTakeRemote }) {
+function RestorePanel({ onMerge, onReplace }) {
+  const [list, setList] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [preview, setPreview] = useState(null);
+
+  async function load() {
+    setBusy(true); setErr(''); setPreview(null);
+    try {
+      setList(await ghHistory());
+    } catch (e) { setErr(String(e.message || e)); }
+    setBusy(false);
+  }
+
+  async function inspect(v) {
+    setBusy(true); setErr('');
+    try {
+      const rev = await ghRevision(v.version);
+      setPreview({ ...rev, version: v.version, at: v.at });
+    } catch (e) { setErr(String(e.message || e)); }
+    setBusy(false);
+  }
+
+  return (
+    <div className="mt-4 pt-3 border-t border-stone-200">
+      <h5 className="text-sm font-medium text-stone-700">Restore from sync history</h5>
+      <p className="text-xs text-stone-500 mb-2">
+        Every sync is kept as a revision. If something was overwritten, find the version that still had it and merge
+        it back — merging adds what is missing without removing anything you have now.
+      </p>
+
+      {!list && (
+        <button onClick={load} disabled={busy}
+          className="w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100 disabled:opacity-60">
+          {busy ? 'Loading…' : 'Show sync history'}
+        </button>
+      )}
+      {err && <p className="text-xs text-red-700 mt-2">{err}</p>}
+
+      {list && !preview && (
+        <div className="mt-2 max-h-64 overflow-y-auto border border-stone-200 rounded-md divide-y divide-stone-100">
+          {list.length === 0 && <p className="text-sm text-stone-500 p-3">No history yet.</p>}
+          {list.map(v => (
+            <button key={v.version} onClick={() => inspect(v)} disabled={busy}
+              className="w-full text-left px-3 py-2 hover:bg-stone-50 disabled:opacity-60">
+              <div className="text-sm text-stone-800">{new Date(v.at).toLocaleString()}</div>
+              <div className="text-[11px] text-stone-400">
+                {typeof v.changes.additions === 'number' ? '+' + v.changes.additions + ' / −' + (v.changes.deletions || 0) + ' lines' : 'revision'}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {preview && (
+        <div className="mt-2 border border-stone-300 rounded-md p-3 bg-stone-50">
+          <p className="text-sm text-stone-800 font-medium">
+            {new Date(preview.at).toLocaleString()}
+            {preview.device ? ' · saved from ' + preview.device : ''}
+          </p>
+          <p className="text-sm text-stone-700 mt-1">
+            Holds {preview.people.length} {preview.people.length === 1 ? 'person' : 'people'}:
+          </p>
+          <p className="text-xs text-stone-500 mt-0.5">{preview.people.map(p => p.name).join(', ') || '—'}</p>
+          <button onClick={() => onMerge(preview.people)}
+            className="mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800">
+            Merge this version in
+          </button>
+          <button onClick={() => onReplace(preview.people)}
+            className="mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
+            Roll everything back to this
+          </button>
+          <button onClick={() => setPreview(null)} className="w-full text-sm text-stone-500 py-2">Back to the list</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SyncConflictModal({ info, onKeepLocal, onTakeRemote, onMerge, onCancel }) {
   return (
     <div className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4">
       <div className="bg-white rounded-lg max-w-sm w-full p-4">
@@ -5568,15 +5844,23 @@ function SyncConflictModal({ info, onKeepLocal, onTakeRemote }) {
           {info.remote.device ? ' from ' + info.remote.device : ''} on {new Date(info.remote.updatedAt).toLocaleString()}.
           This device has <strong>{info.localCount}</strong>.
         </p>
-        <button onClick={onTakeRemote}
+        <button onClick={onMerge}
           className="mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800">
-          Use the synced copy
+          Combine both — keep everything
+        </button>
+        <p className="text-[11px] text-stone-400 mt-1">The safe choice. Nothing is discarded from either copy.</p>
+        <button onClick={onTakeRemote}
+          className="mt-3 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
+          Use the synced copy only
         </button>
         <button onClick={onKeepLocal}
           className="mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
-          Keep this device and overwrite
+          Keep this device only
         </button>
-        <p className="text-[11px] text-stone-400 mt-2">Either way the Gist keeps its history, so nothing is permanently lost.</p>
+        <button onClick={onCancel} className="w-full text-sm text-stone-500 py-2 mt-1">
+          Decide later — leave both as they are
+        </button>
+        <p className="text-[11px] text-stone-400">Either way the Gist keeps its history, so nothing is permanently lost.</p>
       </div>
     </div>
   );
@@ -5745,11 +6029,12 @@ function InsightsModal({ people, onClose }) {
 
 // ---------- Settings (API key, export/import for backup or moving between devices) ----------
 
-function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync, onDisconnectSync, onSyncNow, onExported, onLockChanged, lockVersion }) {
+function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync, onDisconnectSync, onSyncNow, onExported, onLockChanged, lockVersion, onRestoreMerge, onRestoreReplace }) {
   const [apiKey, setApiKey] = useState(() => Local.get('anthropic-api-key') || '');
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
   const [importErr, setImportErr] = useState('');
+  const [pending, setPending] = useState(null);
   const importInputRef = React.useRef(null);
 
   function saveKey() {
@@ -5777,18 +6062,31 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
     if (!file) return;
     setImportErr('');
     const reader = new FileReader();
-    reader.onload = async () => {
+    reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result);
         const people2 = Array.isArray(parsed) ? parsed : parsed.people;
         if (!Array.isArray(people2)) throw new Error('bad shape');
-        await onImportData(people2.map(backfillPerson));
+        // Don't touch anything yet — show what this file would do first.
+        const incoming = people2.map(backfillPerson);
+        const preview = mergePeopleLists(people, incoming);
+        setPending({ incoming, preview, exportedAt: parsed.exportedAt || '' });
       } catch (err) {
         setImportErr('Could not read that file — expecting a backup exported from this app.');
       }
     };
     reader.onerror = () => setImportErr('Could not read that file.');
     reader.readAsText(file);
+  }
+
+  async function doMerge() {
+    await onImportData(pending.preview.people);
+    setPending(null);
+  }
+
+  async function doReplace() {
+    await onImportData(pending.incoming);
+    setPending(null);
   }
 
   return (
@@ -5850,6 +6148,37 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
               <input ref={importInputRef} type="file" accept="application/json,.json" className="hidden" onChange={handleImportFile} />
             </div>
             {importErr && <p className="text-xs text-red-700 mt-2">{importErr}</p>}
+
+            {pending && (
+              <div className="mt-3 border border-stone-300 rounded-md p-3 bg-stone-50">
+                <p className="text-sm text-stone-800 font-medium">
+                  That file holds {pending.incoming.length} {pending.incoming.length === 1 ? 'person' : 'people'}
+                  {pending.exportedAt ? ', exported ' + new Date(pending.exportedAt).toLocaleString() : ''}.
+                </p>
+                <p className="text-sm text-stone-700 mt-1">
+                  Merging keeps everything on this device and folds the file in:
+                  {' '}<strong>{pending.preview.merged}</strong> {pending.preview.merged === 1 ? 'person' : 'people'} combined,
+                  {' '}<strong>{pending.preview.added}</strong> added
+                  {' '}— {pending.preview.people.length} in total.
+                </p>
+                {pending.preview.addedNames.length > 0 && (
+                  <p className="text-xs text-stone-500 mt-1">New: {pending.preview.addedNames.join(', ')}</p>
+                )}
+                <button onClick={doMerge}
+                  className="mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800">
+                  Merge — keep both
+                </button>
+                <button onClick={doReplace}
+                  className="mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
+                  Replace everything on this device
+                </button>
+                <button onClick={() => setPending(null)} className="w-full text-sm text-stone-500 py-2">Cancel</button>
+                <p className="text-[11px] text-stone-400 mt-1">
+                  Merging never deletes: dates, messages, photos and notes from both copies are kept, and where the same
+                  thing exists twice the more recently touched copy wins.
+                </p>
+              </div>
+            )}
             <p className="text-[11px] text-stone-400 mt-3">Build {BUILD_STAMP}</p>
             <LockPanel key={lockVersion} onChanged={onLockChanged} />
             <SyncPanel
@@ -5857,6 +6186,8 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
               onConnect={onConnectSync}
               onDisconnect={onDisconnectSync}
               onSyncNow={onSyncNow}
+              onRestoreMerge={onRestoreMerge}
+              onRestoreReplace={onRestoreReplace}
             />
             {(() => {
               let last = null;
@@ -6152,7 +6483,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-03 18:40';
+const BUILD_STAMP = '2026-08-03 19:35';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -6252,6 +6583,38 @@ async function ghPull() {
     content = await raw.text();
   }
   if (!content) return null;
+  const parsed = JSON.parse(content);
+  return {
+    updatedAt: parsed.updatedAt || '',
+    device: parsed.device || '',
+    people: Array.isArray(parsed.people) ? parsed.people.map(backfillPerson) : []
+  };
+}
+
+// Every save to the Gist is a revision GitHub keeps. That is the safety net when
+// a sync goes the wrong way.
+async function ghHistory() {
+  const id = Sync.gistId();
+  if (!id) throw new Error('Not connected to sync.');
+  const commits = await ghFetch('/gists/' + id + '/commits?per_page=40');
+  return (commits || []).map(c => ({
+    version: c.version,
+    at: c.committed_at,
+    changes: c.change_status || {}
+  }));
+}
+async function ghRevision(version) {
+  const id = Sync.gistId();
+  if (!id) throw new Error('Not connected to sync.');
+  const gist = await ghFetch('/gists/' + id + '/' + version);
+  const file = gist.files && gist.files[GIST_FILE];
+  if (!file) throw new Error('That revision has no data file.');
+  let content = file.content;
+  if (file.truncated && file.raw_url) {
+    const raw = await fetch(file.raw_url);
+    if (!raw.ok) throw new Error('Could not download that revision.');
+    content = await raw.text();
+  }
   const parsed = JSON.parse(content);
   return {
     updatedAt: parsed.updatedAt || '',
@@ -6533,6 +6896,7 @@ function migrateFromFlatList(flat) {
 // Backfill fields added after initial release, for people saved by an earlier version.
 function backfillPerson(p) {
   const out = {
+    id: p && p.id || 'p-' + Date.now() + Math.random().toString(36).slice(2, 8),
     photos: [],
     profilePhotoId: null,
     conversationLog: [],
@@ -6692,6 +7056,163 @@ function daysFromFlatLog(log) {
     byDate[d].points.push(p);
   });
   return Object.values(byDate).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+}
+
+// ---------- Merging two copies ----------
+// Editing on two devices between syncs leaves two partly-right copies. Replacing
+// one with the other throws work away, so this folds them together instead.
+
+function personKey(p) {
+  return normaliseMsg(p.name || '');
+}
+function pickLater(a, b) {
+  const ra = activityRank(a) || '',
+    rb = activityRank(b) || '';
+  return rb > ra ? b : a;
+}
+function unionBy(listA, listB, keyOf) {
+  const out = [];
+  const seen = new Set();
+  [...(listA || []), ...(listB || [])].forEach(item => {
+    if (!item) return;
+    const k = keyOf(item);
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    out.push(item);
+  });
+  return out;
+}
+function mergeDays(daysA, daysB) {
+  const byDate = {};
+  [...(daysA || []), ...(daysB || [])].forEach(d => {
+    if (!d) return;
+    const key = d.date || 'undated';
+    if (!byDate[key]) {
+      byDate[key] = {
+        ...d,
+        facts: [...(d.facts || [])],
+        points: [...(d.points || [])]
+      };
+      return;
+    }
+    const t = byDate[key];
+    if (d.summary && !normaliseMsg(t.summary || '').includes(normaliseMsg(d.summary).slice(0, 40))) {
+      t.summary = ((t.summary || '') + ' ' + d.summary).trim();
+    }
+    (d.facts || []).forEach(f => {
+      if (!t.facts.some(x => normaliseMsg(x) === normaliseMsg(f))) t.facts.push(f);
+    });
+    (d.points || []).forEach(pt => {
+      if (!t.points.some(x => pointKey(x) === pointKey(pt))) t.points.push(pt);
+    });
+  });
+  return Object.values(byDate).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+}
+function mergeMyRead(a, b) {
+  const ra = {
+      ...emptyMyRead(),
+      ...(a || {})
+    },
+    rb = {
+      ...emptyMyRead(),
+      ...(b || {})
+    };
+  const out = {
+    ...ra
+  };
+  Object.keys(emptyMyRead()).forEach(k => {
+    if (k === 'flags') return;
+    const av = ra[k],
+      bv = rb[k];
+    const aEmpty = av === null || av === '' || av === 0;
+    if (aEmpty && !(bv === null || bv === '' || bv === 0)) out[k] = bv;
+  });
+  out.flags = unionBy(ra.flags || [], rb.flags || [], f => normaliseMsg(f));
+  return out;
+}
+function mergePerson(a, b) {
+  const base = pickLater(a, b); // the more recently touched copy leads
+  const other = base === a ? b : a;
+  const out = {
+    ...other,
+    ...base
+  };
+
+  // Scalars: keep whatever is filled in, preferring the leading copy.
+  ['meetingChannel', 'phone', 'notes', 'endReason', 'endDate', 'endNotes', 'relStart', 'relEnd', 'relType', 'chatSummary'].forEach(k => {
+    if (!out[k] && other[k]) out[k] = other[k];
+  });
+  out.dateMet = [a.dateMet, b.dateMet].filter(Boolean).sort()[0] || '';
+  out.lastContact = [a.lastContact, b.lastContact].filter(Boolean).sort().slice(-1)[0] || '';
+  out.profile = {
+    ...emptyProfile(),
+    ...(other.profile || {}),
+    ...(base.profile || {})
+  };
+  PROFILE_FIELDS.forEach(([k]) => {
+    if (!out.profile[k] && other.profile && other.profile[k]) out.profile[k] = other.profile[k];
+  });
+  if (!out.profile.bio && other.profile && other.profile.bio) out.profile.bio = other.profile.bio;
+  out.profile.interests = unionBy((a.profile || {}).interests, (b.profile || {}).interests, x => normaliseMsg(x));
+  out.profile.socials = unionBy((a.profile || {}).socials, (b.profile || {}).socials, x => normaliseMsg(x));
+  out.profile.prompts = unionBy((a.profile || {}).prompts, (b.profile || {}).prompts, x => normaliseMsg(x.question) + '|' + normaliseMsg(x.answer));
+  out.conversationDays = mergeDays(a.conversationDays, b.conversationDays);
+  out.conversationLog = flattenDays(out.conversationDays);
+  out.dates = unionBy(a.dates, b.dates, d => d.id || normaliseMsg(d.date) + '|' + normaliseMsg(d.location)).sort((x, y) => (x.date || '').localeCompare(y.date || ''));
+  out.contactLog = unionBy(a.contactLog, b.contactLog, c => c.id || normaliseMsg(c.date) + '|' + normaliseMsg(c.text)).sort((x, y) => (x.date || '').localeCompare(y.date || ''));
+  out.photos = unionBy(a.photos, b.photos, ph => ph.id);
+  out.dateSuggestions = unionBy(a.dateSuggestions, b.dateSuggestions, x => x.key);
+  out.dismissedDateKeys = unionBy(a.dismissedDateKeys, b.dismissedDateKeys, x => x);
+  out.dateSuggestions = out.dateSuggestions.filter(x => !out.dismissedDateKeys.includes(x.key));
+  out.myRead = mergeMyRead(base.myRead, other.myRead);
+
+  // Keep whichever read was taken later.
+  const ga = a.coachRead && a.coachRead.generatedAt || '';
+  const gb = b.coachRead && b.coachRead.generatedAt || '';
+  out.coachRead = gb > ga ? b.coachRead : a.coachRead || b.coachRead || null;
+  return backfillPerson(out);
+}
+
+// Fold an imported list into the current one, reporting what happened.
+function mergePeopleLists(current, incoming) {
+  const result = (current || []).map(p => ({
+    ...p
+  }));
+  const index = new Map();
+  result.forEach((p, i) => {
+    if (p.id) index.set('id:' + p.id, i);
+    const nk = personKey(p);
+    if (nk) index.set('name:' + nk, i);
+  });
+  let merged = 0,
+    added = 0;
+  const mergedNames = [],
+    addedNames = [];
+  (incoming || []).forEach(inc => {
+    if (!inc || !inc.name) return;
+    const byId = inc.id ? index.get('id:' + inc.id) : undefined;
+    const nk = personKey(inc);
+    let i = byId !== undefined ? byId : nk ? index.get('name:' + nk) : undefined;
+    if (i === undefined) {
+      const added2 = backfillPerson(inc);
+      result.push(added2);
+      if (added2.id) index.set('id:' + added2.id, result.length - 1);
+      if (nk) index.set('name:' + nk, result.length - 1);
+      added += 1;
+      addedNames.push(inc.name);
+    } else {
+      result[i] = mergePerson(result[i], backfillPerson(inc));
+      merged += 1;
+      mergedNames.push(result[i].name);
+    }
+  });
+  return {
+    people: result,
+    merged,
+    added,
+    mergedNames,
+    addedNames
+  };
 }
 
 // ---------- Your side of it: intent, interest, logistics ----------
@@ -8788,11 +9309,19 @@ function RelationshipTracker() {
       }));
     }
   }
-  async function resolveConflict(takeRemote) {
+  async function resolveConflict(mode) {
     const remote = syncConflict && syncConflict.remote;
     setSyncConflict(null);
     if (!remote) return;
-    if (takeRemote) {
+    if (mode === 'merge') {
+      const merged = mergePeopleLists(peopleRef.current, remote.people).people;
+      setPeople(merged);
+      await DataStore.set('people-list', JSON.stringify(merged));
+      await pushToCloud(merged);
+      setNotice('Combined both copies — ' + merged.length + ' people.');
+      return;
+    }
+    if (mode === 'remote') {
       setPeople(remote.people);
       await DataStore.set('people-list', JSON.stringify(remote.people));
       Sync.markPulled(remote.updatedAt);
@@ -8801,11 +9330,16 @@ function RelationshipTracker() {
         last: remote.updatedAt,
         error: ''
       });
-      setNotice('Replaced with the synced copy (' + remote.people.length + ' people).');
-    } else {
-      await pushToCloud(peopleRef.current);
-      setNotice('Kept this device and overwrote the synced copy.');
+      setNotice('Using the synced copy (' + remote.people.length + ' people).');
+      return;
     }
+    await pushToCloud(peopleRef.current);
+    setNotice('Kept this device and overwrote the synced copy.');
+  }
+  async function restoreFromHistory(incoming, mode) {
+    const merged = mode === 'replace' ? incoming : mergePeopleLists(peopleRef.current, incoming).people;
+    await persist(merged);
+    setNotice(mode === 'replace' ? 'Rolled back to that version — ' + merged.length + ' people.' : 'Merged that version in — ' + merged.length + ' people now.');
   }
   async function connectSync(token) {
     Sync.save(token, '');
@@ -9632,8 +10166,10 @@ function RelationshipTracker() {
       onClose: () => setLightbox(null)
     }), syncConflict && /*#__PURE__*/React.createElement(SyncConflictModal, {
       info: syncConflict,
-      onKeepLocal: () => resolveConflict(false),
-      onTakeRemote: () => resolveConflict(true)
+      onKeepLocal: () => resolveConflict('local'),
+      onTakeRemote: () => resolveConflict('remote'),
+      onMerge: () => resolveConflict('merge'),
+      onCancel: () => setSyncConflict(null)
     }), notice && /*#__PURE__*/React.createElement(NoticeToast, {
       message: notice,
       onClose: () => setNotice('')
@@ -9674,6 +10210,10 @@ function RelationshipTracker() {
         setBackupNag(false);
       },
       onLockChanged: () => setLockVersion(v => v + 1),
+      onRestoreMerge: ppl => restoreFromHistory(ppl, 'merge'),
+      onRestoreReplace: ppl => restoreFromHistory(ppl, 'replace'),
+      onRestoreMerge: ppl => restoreFromHistory(ppl, 'merge'),
+      onRestoreReplace: ppl => restoreFromHistory(ppl, 'replace'),
       lockVersion: lockVersion
     }), error && /*#__PURE__*/React.createElement(ErrorToast, {
       message: error
@@ -9920,6 +10460,8 @@ function RelationshipTracker() {
       setBackupNag(false);
     },
     onLockChanged: () => setLockVersion(v => v + 1),
+    onRestoreMerge: ppl => restoreFromHistory(ppl, 'merge'),
+    onRestoreReplace: ppl => restoreFromHistory(ppl, 'replace'),
     lockVersion: lockVersion
   }));
 }
@@ -12040,7 +12582,9 @@ function SyncPanel({
   syncState: rawState,
   onConnect,
   onDisconnect,
-  onSyncNow
+  onSyncNow,
+  onRestoreMerge,
+  onRestoreReplace
 }) {
   const syncState = rawState || {
     status: Sync.configured() ? 'idle' : 'off',
@@ -12091,12 +12635,95 @@ function SyncPanel({
     className: "flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
   }, "Turn off here")), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-stone-400 mt-1"
-  }, "Changes upload a few seconds after you make them, and download when the app opens.")));
+  }, "Changes upload a few seconds after you make them, and download when the app opens."), /*#__PURE__*/React.createElement(RestorePanel, {
+    onMerge: onRestoreMerge,
+    onReplace: onRestoreReplace
+  })));
+}
+function RestorePanel({
+  onMerge,
+  onReplace
+}) {
+  const [list, setList] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [preview, setPreview] = useState(null);
+  async function load() {
+    setBusy(true);
+    setErr('');
+    setPreview(null);
+    try {
+      setList(await ghHistory());
+    } catch (e) {
+      setErr(String(e.message || e));
+    }
+    setBusy(false);
+  }
+  async function inspect(v) {
+    setBusy(true);
+    setErr('');
+    try {
+      const rev = await ghRevision(v.version);
+      setPreview({
+        ...rev,
+        version: v.version,
+        at: v.at
+      });
+    } catch (e) {
+      setErr(String(e.message || e));
+    }
+    setBusy(false);
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    className: "mt-4 pt-3 border-t border-stone-200"
+  }, /*#__PURE__*/React.createElement("h5", {
+    className: "text-sm font-medium text-stone-700"
+  }, "Restore from sync history"), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-500 mb-2"
+  }, "Every sync is kept as a revision. If something was overwritten, find the version that still had it and merge it back — merging adds what is missing without removing anything you have now."), !list && /*#__PURE__*/React.createElement("button", {
+    onClick: load,
+    disabled: busy,
+    className: "w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100 disabled:opacity-60"
+  }, busy ? 'Loading…' : 'Show sync history'), err && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-red-700 mt-2"
+  }, err), list && !preview && /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 max-h-64 overflow-y-auto border border-stone-200 rounded-md divide-y divide-stone-100"
+  }, list.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-500 p-3"
+  }, "No history yet."), list.map(v => /*#__PURE__*/React.createElement("button", {
+    key: v.version,
+    onClick: () => inspect(v),
+    disabled: busy,
+    className: "w-full text-left px-3 py-2 hover:bg-stone-50 disabled:opacity-60"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-sm text-stone-800"
+  }, new Date(v.at).toLocaleString()), /*#__PURE__*/React.createElement("div", {
+    className: "text-[11px] text-stone-400"
+  }, typeof v.changes.additions === 'number' ? '+' + v.changes.additions + ' / −' + (v.changes.deletions || 0) + ' lines' : 'revision')))), preview && /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 border border-stone-300 rounded-md p-3 bg-stone-50"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-800 font-medium"
+  }, new Date(preview.at).toLocaleString(), preview.device ? ' · saved from ' + preview.device : ''), /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-700 mt-1"
+  }, "Holds ", preview.people.length, " ", preview.people.length === 1 ? 'person' : 'people', ":"), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-500 mt-0.5"
+  }, preview.people.map(p => p.name).join(', ') || '—'), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onMerge(preview.people),
+    className: "mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800"
+  }, "Merge this version in"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onReplace(preview.people),
+    className: "mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
+  }, "Roll everything back to this"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPreview(null),
+    className: "w-full text-sm text-stone-500 py-2"
+  }, "Back to the list")));
 }
 function SyncConflictModal({
   info,
   onKeepLocal,
-  onTakeRemote
+  onTakeRemote,
+  onMerge,
+  onCancel
 }) {
   return /*#__PURE__*/React.createElement("div", {
     className: "fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4"
@@ -12107,13 +12734,21 @@ function SyncConflictModal({
   }, "Two copies differ"), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-700"
   }, "The synced copy has ", /*#__PURE__*/React.createElement("strong", null, info.remote.people.length, " people"), " and was last saved", info.remote.device ? ' from ' + info.remote.device : '', " on ", new Date(info.remote.updatedAt).toLocaleString(), ". This device has ", /*#__PURE__*/React.createElement("strong", null, info.localCount), "."), /*#__PURE__*/React.createElement("button", {
-    onClick: onTakeRemote,
+    onClick: onMerge,
     className: "mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800"
-  }, "Use the synced copy"), /*#__PURE__*/React.createElement("button", {
+  }, "Combine both — keep everything"), /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-stone-400 mt-1"
+  }, "The safe choice. Nothing is discarded from either copy."), /*#__PURE__*/React.createElement("button", {
+    onClick: onTakeRemote,
+    className: "mt-3 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
+  }, "Use the synced copy only"), /*#__PURE__*/React.createElement("button", {
     onClick: onKeepLocal,
     className: "mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
-  }, "Keep this device and overwrite"), /*#__PURE__*/React.createElement("p", {
-    className: "text-[11px] text-stone-400 mt-2"
+  }, "Keep this device only"), /*#__PURE__*/React.createElement("button", {
+    onClick: onCancel,
+    className: "w-full text-sm text-stone-500 py-2 mt-1"
+  }, "Decide later — leave both as they are"), /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-stone-400"
   }, "Either way the Gist keeps its history, so nothing is permanently lost.")));
 }
 
@@ -12314,12 +12949,15 @@ function SettingsModal({
   onSyncNow,
   onExported,
   onLockChanged,
-  lockVersion
+  lockVersion,
+  onRestoreMerge,
+  onRestoreReplace
 }) {
   const [apiKey, setApiKey] = useState(() => Local.get('anthropic-api-key') || '');
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
   const [importErr, setImportErr] = useState('');
+  const [pending, setPending] = useState(null);
   const importInputRef = React.useRef(null);
   function saveKey() {
     Local.set('anthropic-api-key', apiKey.trim());
@@ -12346,18 +12984,33 @@ function SettingsModal({
     if (!file) return;
     setImportErr('');
     const reader = new FileReader();
-    reader.onload = async () => {
+    reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result);
         const people2 = Array.isArray(parsed) ? parsed : parsed.people;
         if (!Array.isArray(people2)) throw new Error('bad shape');
-        await onImportData(people2.map(backfillPerson));
+        // Don't touch anything yet — show what this file would do first.
+        const incoming = people2.map(backfillPerson);
+        const preview = mergePeopleLists(people, incoming);
+        setPending({
+          incoming,
+          preview,
+          exportedAt: parsed.exportedAt || ''
+        });
       } catch (err) {
         setImportErr('Could not read that file — expecting a backup exported from this app.');
       }
     };
     reader.onerror = () => setImportErr('Could not read that file.');
     reader.readAsText(file);
+  }
+  async function doMerge() {
+    await onImportData(pending.preview.people);
+    setPending(null);
+  }
+  async function doReplace() {
+    await onImportData(pending.incoming);
+    setPending(null);
   }
   return /*#__PURE__*/React.createElement("div", {
     className: "fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4 sm:flex sm:items-center sm:justify-center"
@@ -12430,7 +13083,26 @@ function SettingsModal({
     onChange: handleImportFile
   })), importErr && /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-red-700 mt-2"
-  }, importErr), /*#__PURE__*/React.createElement("p", {
+  }, importErr), pending && /*#__PURE__*/React.createElement("div", {
+    className: "mt-3 border border-stone-300 rounded-md p-3 bg-stone-50"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-800 font-medium"
+  }, "That file holds ", pending.incoming.length, " ", pending.incoming.length === 1 ? 'person' : 'people', pending.exportedAt ? ', exported ' + new Date(pending.exportedAt).toLocaleString() : '', "."), /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-700 mt-1"
+  }, "Merging keeps everything on this device and folds the file in:", ' ', /*#__PURE__*/React.createElement("strong", null, pending.preview.merged), " ", pending.preview.merged === 1 ? 'person' : 'people', " combined,", ' ', /*#__PURE__*/React.createElement("strong", null, pending.preview.added), " added", ' ', "— ", pending.preview.people.length, " in total."), pending.preview.addedNames.length > 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-500 mt-1"
+  }, "New: ", pending.preview.addedNames.join(', ')), /*#__PURE__*/React.createElement("button", {
+    onClick: doMerge,
+    className: "mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800"
+  }, "Merge — keep both"), /*#__PURE__*/React.createElement("button", {
+    onClick: doReplace,
+    className: "mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
+  }, "Replace everything on this device"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPending(null),
+    className: "w-full text-sm text-stone-500 py-2"
+  }, "Cancel"), /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-stone-400 mt-1"
+  }, "Merging never deletes: dates, messages, photos and notes from both copies are kept, and where the same thing exists twice the more recently touched copy wins.")), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-stone-400 mt-3"
   }, "Build ", BUILD_STAMP), /*#__PURE__*/React.createElement(LockPanel, {
     key: lockVersion,
@@ -12439,7 +13111,9 @@ function SettingsModal({
     syncState: syncState,
     onConnect: onConnectSync,
     onDisconnect: onDisconnectSync,
-    onSyncNow: onSyncNow
+    onSyncNow: onSyncNow,
+    onRestoreMerge: onRestoreMerge,
+    onRestoreReplace: onRestoreReplace
   }), (() => {
     let last = null;
     try {
