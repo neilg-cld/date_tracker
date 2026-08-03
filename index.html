@@ -395,7 +395,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-03 15:13';
+const BUILD_STAMP = '2026-08-03 16:16';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -1126,30 +1126,29 @@ function sliceImageToPanels(imgEl) {
   if (count > MAX_PANELS) count = MAX_PANELS;
   const step = H / count;
   const overlapPx = step * PANEL_OVERLAP;
-  const panels = [];
+  const plans = [];
   for (let i = 0; i < count; i++) {
     const sy = Math.max(0, i * step - (i > 0 ? overlapPx : 0));
     const sy2 = Math.min(H, (i + 1) * step + (i < count - 1 ? overlapPx : 0));
-    const sh = sy2 - sy;
-    // A 540px-wide phone capture is small for reading badge text. Scale up to
-    // 2x where there is headroom, but never past the point where the API would
-    // downscale it again (roughly 1568px on the long edge).
-    const scale = Math.min(2, PANEL_WIDTH_CAP / W, 1500 / sh);
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(W * scale));
-    canvas.height = Math.max(1, Math.round(sh * scale));
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(imgEl, 0, sy, W, sh, 0, 0, canvas.width, canvas.height);
-    const encoded = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
-    canvas.width = 0; canvas.height = 0;   // release the backing store immediately
-    panels.push({
-      index: i + 1,
-      base64: encoded,
-      y0: sy / H,
-      y1: sy2 / H,
-    });
+    // Geometry only. Encoding every panel up front is what exhausts memory on a
+    // phone, so pixels are produced one section at a time and thrown away after.
+    plans.push({ index: i + 1, sy, sh: sy2 - sy, y0: sy / H, y1: sy2 / H });
   }
-  return panels;
+  return plans;
+}
+
+// Encode one panel to JPEG, then release the canvas immediately.
+function renderPanel(imgEl, plan) {
+  const W = imgEl.naturalWidth;
+  const scale = Math.min(2, PANEL_WIDTH_CAP / W, 1500 / plan.sh);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(W * scale));
+  canvas.height = Math.max(1, Math.round(plan.sh * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(imgEl, 0, plan.sy, W, plan.sh, 0, 0, canvas.width, canvas.height);
+  const data = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+  canvas.width = 0; canvas.height = 0;
+  return data;
 }
 
 // Crop a photo region at the source image's own resolution.
@@ -1350,7 +1349,7 @@ async function extractChatPayload(files, onProgress) {
     const dated = CONVERSATION_EXTRACT_PROMPT + '\n\nToday is '
       + today.toLocaleDateString('en-IE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
       + ' (' + TODAY() + '). Resolve every divider against that.';
-    const fields = await extractFromScreenshot(file, dated, 8000, mergeChatResults, onProgress, w => imageWarnings.push(w));
+    const fields = await extractFromScreenshot(file, dated, 3500, mergeChatResults, onProgress, w => imageWarnings.push(w));
     if (fields.summary) summaryParts.push(fields.summary);
     if (Array.isArray(fields.sessions)) sessions = sessions.concat(fields.sessions);
     if (Array.isArray(fields.phoneNumbers)) phoneNumbers = phoneNumbers.concat(fields.phoneNumbers);
@@ -1521,10 +1520,7 @@ async function runProfileExtraction(files, onProgress) {
       imgEl = await loadImageEl(file);
       panels = sliceImageToPanels(imgEl);
       if (onProgress) onProgress(`Reading image ${fileNo} of ${files.length} (${panels.length} panel${panels.length === 1 ? '' : 's'})…`);
-      const fields = await extractFromPanels(panels, PROFILE_EXTRACT_PROMPT, 4000, mergeProfileResults, onProgress);
-      // The encoded panels are several megabytes; only the y bounds are needed
-      // from here on, so drop the image data before cropping.
-      panels.forEach(p => { p.base64 = null; });
+      const fields = await extractFromPanels(imgEl, panels, PROFILE_EXTRACT_PROMPT, 4000, mergeProfileResults, onProgress);
       if (!name && fields.name) name = String(fields.name).trim();
       mergeProfileDrafts(profile, fields);
       const regions = Array.isArray(fields.photoRegions) ? fields.photoRegions : [];
@@ -1572,11 +1568,16 @@ function requireApiKey() {
   return apiKey;
 }
 
-async function callVision(contentBlocks, maxTokens) {
+const REQUEST_TIMEOUT_MS = 120000;
+
+async function callVision(contentBlocks, maxTokens, attempt) {
   const apiKey = requireApiKey();
   let response;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS) : null;
   try {
     response = await fetch('https://api.anthropic.com/v1/messages', {
+      signal: controller ? controller.signal : undefined,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1591,7 +1592,14 @@ async function callVision(contentBlocks, maxTokens) {
       }),
     });
   } catch (netErr) {
-    throw wrapApiError('Network request failed (' + String(netErr && netErr.message || netErr) + ')');
+    const aborted = netErr && (netErr.name === 'AbortError');
+    // One retry covers a dropped mobile connection or a single slow response.
+    if (!attempt) return callVision(contentBlocks, maxTokens, 1);
+    throw wrapApiError(aborted
+      ? 'The request timed out after two minutes. A shorter screenshot will go through.'
+      : 'Network request failed (' + String(netErr && netErr.message || netErr) + ')');
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   if (response.status === 401) {
     const err = new Error('Invalid API key');
@@ -1681,29 +1689,33 @@ function wrapApiError(message) {
   return err;
 }
 
-function panelBlocks(panels, total, prompt) {
-  const blocks = [];
-  panels.forEach(p => {
-    blocks.push({ type: 'text', text: `Panel ${p.index} of ${total} (vertical ${Math.round(p.y0 * 100)}%–${Math.round(p.y1 * 100)}% of the full screenshot):` });
-    blocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: p.base64 } });
-  });
-  blocks.push({ type: 'text', text: prompt });
-  return blocks;
-}
-
 // One call with every panel is best — the model sees the whole profile at once.
 // If that fails (too many images, a truncated reply, a transient API error) fall
 // back to reading three panels at a time and stitching the answers together.
 const PANELS_PER_CHUNK = 4;
 const SINGLE_PASS_LIMIT = 5;   // above this, go straight to sections
 
-async function extractFromPanels(panels, prompt, maxTokens, merge, onProgress) {
-  const total = panels.length;
+async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgress) {
+  const total = plans.length;
 
-  // One call is best when the whole thing fits: the model sees the full context.
+  const runChunk = async (chunk) => {
+    const blocks = [];
+    chunk.forEach(plan => {
+      blocks.push({ type: 'text', text: `Panel ${plan.index} of ${total} (vertical ${Math.round(plan.y0 * 100)}%–${Math.round(plan.y1 * 100)}% of the full screenshot):` });
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: renderPanel(imgEl, plan) } });
+    });
+    blocks.push({ type: 'text', text: prompt });
+    try {
+      return await callVision(blocks, maxTokens || 4000);
+    } finally {
+      // Drop the encoded pixels as soon as the request is done with them.
+      blocks.forEach(b => { if (b.type === 'image') b.source.data = null; });
+    }
+  };
+
   if (total <= SINGLE_PASS_LIMIT) {
     try {
-      return await callVision(panelBlocks(panels, total, prompt), maxTokens || 4000);
+      return await runChunk(plans);
     } catch (err) {
       if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY' || total <= 2) {
         if (err.partial) return err.partial;
@@ -1713,24 +1725,42 @@ async function extractFromPanels(panels, prompt, maxTokens, merge, onProgress) {
     }
   }
 
-  // Long screenshots are read in sections. Each section is small enough to come
-  // back complete, and one bad section no longer costs the whole read.
   const chunks = [];
-  for (let i = 0; i < total; i += PANELS_PER_CHUNK) chunks.push(panels.slice(i, i + PANELS_PER_CHUNK));
-  const results = [];
+  for (let i = 0; i < total; i += PANELS_PER_CHUNK) chunks.push(plans.slice(i, i + PANELS_PER_CHUNK));
+
+  // Two at a time: roughly halves the wait without doubling peak memory.
+  const CONCURRENCY = 2;
+  const slots = new Array(chunks.length).fill(null);
   const failures = [];
-  for (let i = 0; i < chunks.length; i++) {
-    if (onProgress) onProgress('Reading section ' + (i + 1) + ' of ' + chunks.length + '…');
-    try {
-      results.push(await callVision(panelBlocks(chunks[i], total, prompt), maxTokens || 4000));
-    } catch (e) {
-      if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
-      if (e.partial) { results.push(e.partial); }        // a truncated section still has content
-      else failures.push(i + 1);
+  let lastError = null;
+  let done = 0;
+  let next = 0;
+
+  async function worker() {
+    while (next < chunks.length) {
+      const i = next++;
+      try {
+        slots[i] = await runChunk(chunks[i]);
+      } catch (e) {
+        if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+        lastError = e;
+        if (e.partial) slots[i] = e.partial;
+        else failures.push(i + 1);
+      }
+      done += 1;
+      if (onProgress) onProgress('Read ' + done + ' of ' + chunks.length + ' sections…');
+      await new Promise(r => setTimeout(r, 40));
     }
   }
+
+  if (onProgress) onProgress('Reading ' + chunks.length + ' sections…');
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, worker));
+  const results = slots.filter(Boolean);
+  failures.sort((a, b) => a - b);
+
   if (!results.length) {
-    const err = wrapApiError('None of the ' + chunks.length + ' sections could be read.');
+    const err = wrapApiError('None of the ' + chunks.length + ' sections could be read'
+      + (lastError ? ': ' + lastError.message : '.'));
     err.code = 'ALL_SECTIONS_FAILED';
     throw err;
   }
@@ -1798,11 +1828,10 @@ async function extractFromScreenshot(file, prompt, maxTokens, merge, onProgress,
   requireApiKey();
   const imgEl = await loadImageEl(file);
   if (onWarn) assessScreenshot(imgEl).problems.forEach(onWarn);
-  const panels = sliceImageToPanels(imgEl);
+  const plans = sliceImageToPanels(imgEl);
   try {
-    return await extractFromPanels(panels, prompt, maxTokens, merge, onProgress);
+    return await extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgress);
   } finally {
-    panels.forEach(p => { p.base64 = null; });
     try { URL.revokeObjectURL(imgEl.src); } catch (e) {}
     imgEl.src = '';
   }
@@ -5728,7 +5757,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-03 15:13';
+const BUILD_STAMP = '2026-08-03 16:16';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -6538,31 +6567,36 @@ function sliceImageToPanels(imgEl) {
   if (count > MAX_PANELS) count = MAX_PANELS;
   const step = H / count;
   const overlapPx = step * PANEL_OVERLAP;
-  const panels = [];
+  const plans = [];
   for (let i = 0; i < count; i++) {
     const sy = Math.max(0, i * step - (i > 0 ? overlapPx : 0));
     const sy2 = Math.min(H, (i + 1) * step + (i < count - 1 ? overlapPx : 0));
-    const sh = sy2 - sy;
-    // A 540px-wide phone capture is small for reading badge text. Scale up to
-    // 2x where there is headroom, but never past the point where the API would
-    // downscale it again (roughly 1568px on the long edge).
-    const scale = Math.min(2, PANEL_WIDTH_CAP / W, 1500 / sh);
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(W * scale));
-    canvas.height = Math.max(1, Math.round(sh * scale));
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(imgEl, 0, sy, W, sh, 0, 0, canvas.width, canvas.height);
-    const encoded = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
-    canvas.width = 0;
-    canvas.height = 0; // release the backing store immediately
-    panels.push({
+    // Geometry only. Encoding every panel up front is what exhausts memory on a
+    // phone, so pixels are produced one section at a time and thrown away after.
+    plans.push({
       index: i + 1,
-      base64: encoded,
+      sy,
+      sh: sy2 - sy,
       y0: sy / H,
       y1: sy2 / H
     });
   }
-  return panels;
+  return plans;
+}
+
+// Encode one panel to JPEG, then release the canvas immediately.
+function renderPanel(imgEl, plan) {
+  const W = imgEl.naturalWidth;
+  const scale = Math.min(2, PANEL_WIDTH_CAP / W, 1500 / plan.sh);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(W * scale));
+  canvas.height = Math.max(1, Math.round(plan.sh * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(imgEl, 0, plan.sy, W, plan.sh, 0, 0, canvas.width, canvas.height);
+  const data = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+  canvas.width = 0;
+  canvas.height = 0;
+  return data;
 }
 
 // Crop a photo region at the source image's own resolution.
@@ -6795,7 +6829,7 @@ async function extractChatPayload(files, onProgress) {
       month: 'long',
       year: 'numeric'
     }) + ' (' + TODAY() + '). Resolve every divider against that.';
-    const fields = await extractFromScreenshot(file, dated, 8000, mergeChatResults, onProgress, w => imageWarnings.push(w));
+    const fields = await extractFromScreenshot(file, dated, 3500, mergeChatResults, onProgress, w => imageWarnings.push(w));
     if (fields.summary) summaryParts.push(fields.summary);
     if (Array.isArray(fields.sessions)) sessions = sessions.concat(fields.sessions);
     if (Array.isArray(fields.phoneNumbers)) phoneNumbers = phoneNumbers.concat(fields.phoneNumbers);
@@ -7005,12 +7039,7 @@ async function runProfileExtraction(files, onProgress) {
       imgEl = await loadImageEl(file);
       panels = sliceImageToPanels(imgEl);
       if (onProgress) onProgress(`Reading image ${fileNo} of ${files.length} (${panels.length} panel${panels.length === 1 ? '' : 's'})…`);
-      const fields = await extractFromPanels(panels, PROFILE_EXTRACT_PROMPT, 4000, mergeProfileResults, onProgress);
-      // The encoded panels are several megabytes; only the y bounds are needed
-      // from here on, so drop the image data before cropping.
-      panels.forEach(p => {
-        p.base64 = null;
-      });
+      const fields = await extractFromPanels(imgEl, panels, PROFILE_EXTRACT_PROMPT, 4000, mergeProfileResults, onProgress);
       if (!name && fields.name) name = String(fields.name).trim();
       mergeProfileDrafts(profile, fields);
       const regions = Array.isArray(fields.photoRegions) ? fields.photoRegions : [];
@@ -7064,11 +7093,15 @@ function requireApiKey() {
   }
   return apiKey;
 }
-async function callVision(contentBlocks, maxTokens) {
+const REQUEST_TIMEOUT_MS = 120000;
+async function callVision(contentBlocks, maxTokens, attempt) {
   const apiKey = requireApiKey();
   let response;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS) : null;
   try {
     response = await fetch('https://api.anthropic.com/v1/messages', {
+      signal: controller ? controller.signal : undefined,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -7086,7 +7119,12 @@ async function callVision(contentBlocks, maxTokens) {
       })
     });
   } catch (netErr) {
-    throw wrapApiError('Network request failed (' + String(netErr && netErr.message || netErr) + ')');
+    const aborted = netErr && netErr.name === 'AbortError';
+    // One retry covers a dropped mobile connection or a single slow response.
+    if (!attempt) return callVision(contentBlocks, maxTokens, 1);
+    throw wrapApiError(aborted ? 'The request timed out after two minutes. A shorter screenshot will go through.' : 'Network request failed (' + String(netErr && netErr.message || netErr) + ')');
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   if (response.status === 401) {
     const err = new Error('Invalid API key');
@@ -7180,28 +7218,6 @@ function wrapApiError(message) {
   } catch (e) {/* ignore */}
   return err;
 }
-function panelBlocks(panels, total, prompt) {
-  const blocks = [];
-  panels.forEach(p => {
-    blocks.push({
-      type: 'text',
-      text: `Panel ${p.index} of ${total} (vertical ${Math.round(p.y0 * 100)}%–${Math.round(p.y1 * 100)}% of the full screenshot):`
-    });
-    blocks.push({
-      type: 'image',
-      source: {
-        type: 'base64',
-        media_type: 'image/jpeg',
-        data: p.base64
-      }
-    });
-  });
-  blocks.push({
-    type: 'text',
-    text: prompt
-  });
-  return blocks;
-}
 
 // One call with every panel is best — the model sees the whole profile at once.
 // If that fails (too many images, a truncated reply, a transient API error) fall
@@ -7209,13 +7225,40 @@ function panelBlocks(panels, total, prompt) {
 const PANELS_PER_CHUNK = 4;
 const SINGLE_PASS_LIMIT = 5; // above this, go straight to sections
 
-async function extractFromPanels(panels, prompt, maxTokens, merge, onProgress) {
-  const total = panels.length;
-
-  // One call is best when the whole thing fits: the model sees the full context.
+async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgress) {
+  const total = plans.length;
+  const runChunk = async chunk => {
+    const blocks = [];
+    chunk.forEach(plan => {
+      blocks.push({
+        type: 'text',
+        text: `Panel ${plan.index} of ${total} (vertical ${Math.round(plan.y0 * 100)}%–${Math.round(plan.y1 * 100)}% of the full screenshot):`
+      });
+      blocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/jpeg',
+          data: renderPanel(imgEl, plan)
+        }
+      });
+    });
+    blocks.push({
+      type: 'text',
+      text: prompt
+    });
+    try {
+      return await callVision(blocks, maxTokens || 4000);
+    } finally {
+      // Drop the encoded pixels as soon as the request is done with them.
+      blocks.forEach(b => {
+        if (b.type === 'image') b.source.data = null;
+      });
+    }
+  };
   if (total <= SINGLE_PASS_LIMIT) {
     try {
-      return await callVision(panelBlocks(panels, total, prompt), maxTokens || 4000);
+      return await runChunk(plans);
     } catch (err) {
       if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY' || total <= 2) {
         if (err.partial) return err.partial;
@@ -7224,27 +7267,39 @@ async function extractFromPanels(panels, prompt, maxTokens, merge, onProgress) {
       if (onProgress) onProgress('First pass failed — rereading in sections…');
     }
   }
-
-  // Long screenshots are read in sections. Each section is small enough to come
-  // back complete, and one bad section no longer costs the whole read.
   const chunks = [];
-  for (let i = 0; i < total; i += PANELS_PER_CHUNK) chunks.push(panels.slice(i, i + PANELS_PER_CHUNK));
-  const results = [];
+  for (let i = 0; i < total; i += PANELS_PER_CHUNK) chunks.push(plans.slice(i, i + PANELS_PER_CHUNK));
+
+  // Two at a time: roughly halves the wait without doubling peak memory.
+  const CONCURRENCY = 2;
+  const slots = new Array(chunks.length).fill(null);
   const failures = [];
-  for (let i = 0; i < chunks.length; i++) {
-    if (onProgress) onProgress('Reading section ' + (i + 1) + ' of ' + chunks.length + '…');
-    try {
-      results.push(await callVision(panelBlocks(chunks[i], total, prompt), maxTokens || 4000));
-    } catch (e) {
-      if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
-      if (e.partial) {
-        results.push(e.partial);
-      } // a truncated section still has content
-      else failures.push(i + 1);
+  let lastError = null;
+  let done = 0;
+  let next = 0;
+  async function worker() {
+    while (next < chunks.length) {
+      const i = next++;
+      try {
+        slots[i] = await runChunk(chunks[i]);
+      } catch (e) {
+        if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+        lastError = e;
+        if (e.partial) slots[i] = e.partial;else failures.push(i + 1);
+      }
+      done += 1;
+      if (onProgress) onProgress('Read ' + done + ' of ' + chunks.length + ' sections…');
+      await new Promise(r => setTimeout(r, 40));
     }
   }
+  if (onProgress) onProgress('Reading ' + chunks.length + ' sections…');
+  await Promise.all(Array.from({
+    length: Math.min(CONCURRENCY, chunks.length)
+  }, worker));
+  const results = slots.filter(Boolean);
+  failures.sort((a, b) => a - b);
   if (!results.length) {
-    const err = wrapApiError('None of the ' + chunks.length + ' sections could be read.');
+    const err = wrapApiError('None of the ' + chunks.length + ' sections could be read' + (lastError ? ': ' + lastError.message : '.'));
     err.code = 'ALL_SECTIONS_FAILED';
     throw err;
   }
@@ -7322,13 +7377,10 @@ async function extractFromScreenshot(file, prompt, maxTokens, merge, onProgress,
   requireApiKey();
   const imgEl = await loadImageEl(file);
   if (onWarn) assessScreenshot(imgEl).problems.forEach(onWarn);
-  const panels = sliceImageToPanels(imgEl);
+  const plans = sliceImageToPanels(imgEl);
   try {
-    return await extractFromPanels(panels, prompt, maxTokens, merge, onProgress);
+    return await extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgress);
   } finally {
-    panels.forEach(p => {
-      p.base64 = null;
-    });
     try {
       URL.revokeObjectURL(imgEl.src);
     } catch (e) {}
