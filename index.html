@@ -398,7 +398,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-04 19:34';
+const BUILD_STAMP = '2026-08-04 20:47 IST';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -1928,9 +1928,8 @@ async function callVision(contentBlocks, maxTokens, attempt) {
       body: JSON.stringify({
         model: 'claude-sonnet-5',
         max_tokens: maxTokens || 800,
-        // Nothing here benefits from creative variation, and variation is exactly
-        // what makes two reads of one screenshot disagree.
-        temperature: 0,
+        // No temperature: this model rejects the parameter, and sending it made
+        // every single request fail with a 400.
         messages: [{ role: 'user', content: contentBlocks }],
       }),
     });
@@ -3021,12 +3020,21 @@ function downloadIcs(person, entry, sequence) {
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.5.2';
+const APP_VERSION = '1.6.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '1.6.0', date: '2026-08-04', changes: [
+      ['fixed', 'Every API call was failing with a 400 — the temperature setting added in 1.4.0 is not accepted by this model'],
+      ['added', 'Progress bar while a chat screenshot is being read, on the person page and in bulk import'],
+      ['changed', 'Search moved to the top of the home screen, with a clear button'],
+      ['changed', 'Header buttons shrunk to fit one line on a phone'],
+      ['changed', 'Build stamp shows Irish time rather than UTC'],
+    ],
+  },
   {
     version: '1.5.2', date: '2026-08-04', changes: [
       ['fixed', 'Reading could fail outright: at temperature 0 a retry repeated the identical failed request, so three attempts failed the same way'],
@@ -3357,6 +3365,7 @@ function RelationshipTracker() {
   const [showMyRead, setShowMyRead] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   const [chatImport, setChatImport] = useState(null);
+  const [chatProgress, setChatProgress] = useState('');
   const [notice, setNotice] = useState('');
   const [dateConfirm, setDateConfirm] = useState(null);
   const [backupNag, setBackupNag] = useState(false);
@@ -3798,7 +3807,13 @@ function RelationshipTracker() {
 
   async function addConversationFromFiles(files) {
     if (!selected) return;
-    const payload = await extractChatPayload(files);
+    setChatProgress('Preparing the screenshot…');
+    let payload;
+    try {
+      payload = await extractChatPayload(files, setChatProgress);
+    } finally {
+      setChatProgress('');
+    }
 
     // Wrong person? Flag it before writing anything.
     const score = payload.contactName ? nameSimilarity(payload.contactName, selected.name) : 1;
@@ -4254,6 +4269,7 @@ function RelationshipTracker() {
               run: clearConversation,
             })}
             onEditDate={startEditDate}
+            progress={chatProgress}
             onAddContact={() => setContactNote({})}
             onEditContact={(c) => setContactNote(c)}
             dateNotes={((selected.coachRead && selected.coachRead.dateNotes) || [])
@@ -4469,26 +4485,58 @@ function RelationshipTracker() {
         <header className="flex flex-wrap items-center justify-between gap-3 mb-6">
           <div className="flex items-center gap-2 min-w-0">
             <Heart className="w-5 h-5 text-red-700 shrink-0" strokeWidth={1.75} />
-            <h1 className="text-2xl font-serif tracking-tight truncate">Relationship Tracker</h1>
+            <h1 className="text-xl font-serif tracking-tight truncate">Relationship Tracker</h1>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={() => setShowSettings(true)} className="p-2 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-stone-900" aria-label="Settings">
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button onClick={() => setShowSettings(true)} className="p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900" aria-label="Settings" title="Settings">
               <Settings className="w-4 h-4" />
             </button>
-            <button onClick={() => setShowChatImport(true)} className="p-2 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-stone-900" aria-label="Import chats">
+            <button onClick={() => setShowChatImport(true)} className="p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900" aria-label="Import chats" title="Import chats">
               <MessageCircle className="w-4 h-4" />
             </button>
-            <button onClick={() => setShowProfileImport(true)} className="flex items-center gap-1.5 border border-stone-300 text-stone-700 px-3 py-2 rounded-md text-sm font-medium hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-stone-900">
-              <Camera className="w-4 h-4" /> Import profile
+            <button onClick={() => setShowProfileImport(true)} className="p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900" aria-label="Import profile" title="Import profile">
+              <Camera className="w-4 h-4" />
             </button>
-            <button onClick={startAddPerson} className="flex items-center gap-1.5 bg-stone-900 text-white px-3 py-2 rounded-md text-sm font-medium hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-stone-900">
-              <Plus className="w-4 h-4" /> Add person
+            <button onClick={startAddPerson} className="flex items-center gap-1 bg-stone-900 text-white pl-2 pr-2.5 py-1.5 rounded-md text-sm font-medium hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-900">
+              <Plus className="w-4 h-4" /> Add
             </button>
           </div>
         </header>
 
         {error && (
           <div className="mb-4 text-sm text-red-800 bg-red-50 border border-red-200 rounded-md px-3 py-2">{error}</div>
+        )}
+
+        {!loading && people.length > 0 && (
+          <div className="mb-5 space-y-2">
+            <div className="relative">
+              <input
+                type="text" value={query} onChange={e => setQuery(e.target.value)}
+                placeholder="Search name or channel…"
+                className="w-full border border-stone-300 rounded-md pl-3 pr-9 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900"
+              />
+              {query && (
+                <button onClick={() => setQuery('')} aria-label="Clear search"
+                  className="absolute right-1 top-1 p-1.5 text-stone-400 hover:text-stone-900">
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+            <div className="flex gap-1.5 flex-wrap">
+              {['Active', ...STAGES, 'All'].map(f => (
+                <button key={f} onClick={() => setStageFilter(f)}
+                  className={`text-xs px-2.5 py-1 rounded-full border ${
+                    stageFilter === f ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-50'
+                  }`}>
+                  {f}
+                </button>
+              ))}
+              <button onClick={() => setShowInsights(true)}
+                className="text-xs px-2.5 py-1 rounded-full border border-stone-300 bg-white text-stone-600 hover:bg-stone-50 ml-auto">
+                Insights
+              </button>
+            </div>
+          </div>
         )}
 
         {loading && <p className="text-sm text-stone-500">Loading…</p>}
@@ -4526,30 +4574,6 @@ function RelationshipTracker() {
             </p>
             <button onClick={() => setShowSettings(true)}
               className="shrink-0 text-sm font-medium text-amber-900 underline">Back up</button>
-          </div>
-        )}
-
-        {!loading && people.length > 0 && (
-          <div className="mb-4 space-y-2">
-            <input
-              type="text" value={query} onChange={e => setQuery(e.target.value)}
-              placeholder="Search name or channel…"
-              className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900"
-            />
-            <div className="flex gap-1.5 flex-wrap">
-              {['Active', ...STAGES, 'All'].map(f => (
-                <button key={f} onClick={() => setStageFilter(f)}
-                  className={`text-xs px-2.5 py-1 rounded-full border ${
-                    stageFilter === f ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-50'
-                  }`}>
-                  {f}
-                </button>
-              ))}
-              <button onClick={() => setShowInsights(true)}
-                className="text-xs px-2.5 py-1 rounded-full border border-stone-300 bg-white text-stone-600 hover:bg-stone-50 ml-auto">
-                Insights
-              </button>
-            </div>
           </div>
         )}
 
@@ -5677,7 +5701,21 @@ function groupPointsByDate(points) {
 
 
 
-function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClear, onEditDate, onAddContact, onEditContact, needsSummary, onSummarise, dateNotes }) {
+// The reader reports its progress as words; this turns them into a bar so there
+// is something moving on screen while a long chat is read.
+function readPercent(progress) {
+  const t = String(progress || '');
+  const done = t.match(/(\d+) of (\d+) sections done/);
+  if (done) return Math.min(95, 10 + Math.round((Number(done[1]) / Number(done[2])) * 85));
+  const reading = t.match(/Reading (\d+) sections/);
+  if (reading) return 10;
+  if (/Second look/i.test(t)) return 90;
+  if (/retrying/i.test(t)) return 50;
+  if (/Preparing|Slicing/i.test(t)) return 5;
+  return 8;
+}
+
+function ConversationSection({ chronology, summary, progress, onAddFiles, onDelete, onClear, onEditDate, onAddContact, onEditContact, needsSummary, onSummarise, dateNotes }) {
   const items = chronology || [];
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -5719,6 +5757,21 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClea
       <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFiles} />
 
       {err && <p className="text-xs text-red-700 mb-2">{err}</p>}
+
+      {busy && (
+        <div className="mb-3 border border-stone-200 rounded-md p-3 bg-stone-50">
+          <div className="flex items-center justify-between text-sm text-stone-700 mb-2">
+            <span>{progress || 'Reading the screenshot…'}</span>
+            <span className="text-xs text-stone-400">{readPercent(progress)}%</span>
+          </div>
+          <div className="h-1.5 bg-stone-200 rounded-full overflow-hidden">
+            <div className="h-full bg-stone-800 transition-colors" style={{ width: readPercent(progress) + '%' }} />
+          </div>
+          <p className="text-[11px] text-stone-400 mt-1.5">
+            Long chats are read in sections. This can take a minute — leave the page open.
+          </p>
+        </div>
+      )}
 
       {hasChat && (
         <div className="flex items-center gap-2 mb-3">
@@ -6292,7 +6345,12 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose }) {
           )}
 
           {phase === 'loading' && (
-            <p className="text-sm text-stone-600 text-center py-8">{progress || 'Reading…'}</p>
+            <div className="py-8">
+              <p className="text-sm text-stone-600 text-center mb-3">{progress || 'Reading…'}</p>
+              <div className="h-1.5 bg-stone-200 rounded-full overflow-hidden max-w-xs mx-auto">
+                <div className="h-full bg-stone-800" style={{ width: readPercent(progress) + '%' }} />
+              </div>
+            </div>
           )}
 
           {phase === 'error' && (
@@ -7222,7 +7280,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-04 19:34';
+const BUILD_STAMP = '2026-08-04 20:47 IST';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -8977,9 +9035,8 @@ async function callVision(contentBlocks, maxTokens, attempt) {
       body: JSON.stringify({
         model: 'claude-sonnet-5',
         max_tokens: maxTokens || 800,
-        // Nothing here benefits from creative variation, and variation is exactly
-        // what makes two reads of one screenshot disagree.
-        temperature: 0,
+        // No temperature: this model rejects the parameter, and sending it made
+        // every single request fail with a 400.
         messages: [{
           role: 'user',
           content: contentBlocks
@@ -10100,12 +10157,16 @@ function downloadIcs(person, entry, sequence) {
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.5.2';
+const APP_VERSION = '1.6.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '1.6.0',
+  date: '2026-08-04',
+  changes: [['fixed', 'Every API call was failing with a 400 — the temperature setting added in 1.4.0 is not accepted by this model'], ['added', 'Progress bar while a chat screenshot is being read, on the person page and in bulk import'], ['changed', 'Search moved to the top of the home screen, with a clear button'], ['changed', 'Header buttons shrunk to fit one line on a phone'], ['changed', 'Build stamp shows Irish time rather than UTC']]
+}, {
   version: '1.5.2',
   date: '2026-08-04',
   changes: [['fixed', 'Reading could fail outright: at temperature 0 a retry repeated the identical failed request, so three attempts failed the same way'], ['changed', 'Each retry now changes the ask — more room, then a much shorter answer — instead of repeating itself'], ['changed', 'Sections are three panels instead of four, and have 8,000 tokens to reply in'], ['fixed', 'The real reason a read failed is now shown instead of a generic message']]
@@ -10362,6 +10423,7 @@ function RelationshipTracker() {
   const [showMyRead, setShowMyRead] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   const [chatImport, setChatImport] = useState(null);
+  const [chatProgress, setChatProgress] = useState('');
   const [notice, setNotice] = useState('');
   const [dateConfirm, setDateConfirm] = useState(null);
   const [backupNag, setBackupNag] = useState(false);
@@ -10912,7 +10974,13 @@ function RelationshipTracker() {
 
   async function addConversationFromFiles(files) {
     if (!selected) return;
-    const payload = await extractChatPayload(files);
+    setChatProgress('Preparing the screenshot…');
+    let payload;
+    try {
+      payload = await extractChatPayload(files, setChatProgress);
+    } finally {
+      setChatProgress('');
+    }
 
     // Wrong person? Flag it before writing anything.
     const score = payload.contactName ? nameSimilarity(payload.contactName, selected.name) : 1;
@@ -11363,6 +11431,7 @@ function RelationshipTracker() {
         run: clearConversation
       }),
       onEditDate: startEditDate,
+      progress: chatProgress,
       onAddContact: () => setContactNote({}),
       onEditContact: c => setContactNote(c),
       dateNotes: (selected.coachRead && selected.coachRead.dateNotes || []).reduce((acc, d) => {
@@ -11568,34 +11637,63 @@ function RelationshipTracker() {
     className: "w-5 h-5 text-red-700 shrink-0",
     strokeWidth: 1.75
   }), /*#__PURE__*/React.createElement("h1", {
-    className: "text-2xl font-serif tracking-tight truncate"
+    className: "text-xl font-serif tracking-tight truncate"
   }, "Relationship Tracker")), /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-2 flex-wrap"
+    className: "flex items-center gap-1.5 shrink-0"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowSettings(true),
-    className: "p-2 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-stone-900",
-    "aria-label": "Settings"
+    className: "p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900",
+    "aria-label": "Settings",
+    title: "Settings"
   }, /*#__PURE__*/React.createElement(Settings, {
     className: "w-4 h-4"
   })), /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowChatImport(true),
-    className: "p-2 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-stone-900",
-    "aria-label": "Import chats"
+    className: "p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900",
+    "aria-label": "Import chats",
+    title: "Import chats"
   }, /*#__PURE__*/React.createElement(MessageCircle, {
     className: "w-4 h-4"
   })), /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowProfileImport(true),
-    className: "flex items-center gap-1.5 border border-stone-300 text-stone-700 px-3 py-2 rounded-md text-sm font-medium hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-stone-900"
+    className: "p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900",
+    "aria-label": "Import profile",
+    title: "Import profile"
   }, /*#__PURE__*/React.createElement(Camera, {
     className: "w-4 h-4"
-  }), " Import profile"), /*#__PURE__*/React.createElement("button", {
+  })), /*#__PURE__*/React.createElement("button", {
     onClick: startAddPerson,
-    className: "flex items-center gap-1.5 bg-stone-900 text-white px-3 py-2 rounded-md text-sm font-medium hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-stone-900"
+    className: "flex items-center gap-1 bg-stone-900 text-white pl-2 pr-2.5 py-1.5 rounded-md text-sm font-medium hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-900"
   }, /*#__PURE__*/React.createElement(Plus, {
     className: "w-4 h-4"
-  }), " Add person"))), error && /*#__PURE__*/React.createElement("div", {
+  }), " Add"))), error && /*#__PURE__*/React.createElement("div", {
     className: "mb-4 text-sm text-red-800 bg-red-50 border border-red-200 rounded-md px-3 py-2"
-  }, error), loading && /*#__PURE__*/React.createElement("p", {
+  }, error), !loading && people.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "mb-5 space-y-2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "relative"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    value: query,
+    onChange: e => setQuery(e.target.value),
+    placeholder: "Search name or channel…",
+    className: "w-full border border-stone-300 rounded-md pl-3 pr-9 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }), query && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setQuery(''),
+    "aria-label": "Clear search",
+    className: "absolute right-1 top-1 p-1.5 text-stone-400 hover:text-stone-900"
+  }, /*#__PURE__*/React.createElement(X, {
+    className: "w-4 h-4"
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1.5 flex-wrap"
+  }, ['Active', ...STAGES, 'All'].map(f => /*#__PURE__*/React.createElement("button", {
+    key: f,
+    onClick: () => setStageFilter(f),
+    className: `text-xs px-2.5 py-1 rounded-full border ${stageFilter === f ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-50'}`
+  }, f)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowInsights(true),
+    className: "text-xs px-2.5 py-1 rounded-full border border-stone-300 bg-white text-stone-600 hover:bg-stone-50 ml-auto"
+  }, "Insights"))), loading && /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-500"
   }, "Loading…"), !loading && upcoming.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "mb-5 bg-white border border-emerald-200 rounded-lg overflow-hidden"
@@ -11634,24 +11732,7 @@ function RelationshipTracker() {
   }, "No backup in the last 30 days."), /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowSettings(true),
     className: "shrink-0 text-sm font-medium text-amber-900 underline"
-  }, "Back up")), !loading && people.length > 0 && /*#__PURE__*/React.createElement("div", {
-    className: "mb-4 space-y-2"
-  }, /*#__PURE__*/React.createElement("input", {
-    type: "text",
-    value: query,
-    onChange: e => setQuery(e.target.value),
-    placeholder: "Search name or channel…",
-    className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900"
-  }), /*#__PURE__*/React.createElement("div", {
-    className: "flex gap-1.5 flex-wrap"
-  }, ['Active', ...STAGES, 'All'].map(f => /*#__PURE__*/React.createElement("button", {
-    key: f,
-    onClick: () => setStageFilter(f),
-    className: `text-xs px-2.5 py-1 rounded-full border ${stageFilter === f ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-50'}`
-  }, f)), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setShowInsights(true),
-    className: "text-xs px-2.5 py-1 rounded-full border border-stone-300 bg-white text-stone-600 hover:bg-stone-50 ml-auto"
-  }, "Insights"))), !loading && people.length > 0 && visiblePeople.length === 0 && /*#__PURE__*/React.createElement("p", {
+  }, "Back up")), !loading && people.length > 0 && visiblePeople.length === 0 && /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-500 py-10 text-center"
   }, "Nothing matches that filter."), !loading && sortedPeople.length === 0 && /*#__PURE__*/React.createElement("div", {
     className: "py-12 text-stone-500"
@@ -13139,9 +13220,24 @@ function groupPointsByDate(points) {
   });
   return groups;
 }
+
+// The reader reports its progress as words; this turns them into a bar so there
+// is something moving on screen while a long chat is read.
+function readPercent(progress) {
+  const t = String(progress || '');
+  const done = t.match(/(\d+) of (\d+) sections done/);
+  if (done) return Math.min(95, 10 + Math.round(Number(done[1]) / Number(done[2]) * 85));
+  const reading = t.match(/Reading (\d+) sections/);
+  if (reading) return 10;
+  if (/Second look/i.test(t)) return 90;
+  if (/retrying/i.test(t)) return 50;
+  if (/Preparing|Slicing/i.test(t)) return 5;
+  return 8;
+}
 function ConversationSection({
   chronology,
   summary,
+  progress,
   onAddFiles,
   onDelete,
   onClear,
@@ -13200,7 +13296,22 @@ function ConversationSection({
     onChange: handleFiles
   }), err && /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-red-700 mb-2"
-  }, err), hasChat && /*#__PURE__*/React.createElement("div", {
+  }, err), busy && /*#__PURE__*/React.createElement("div", {
+    className: "mb-3 border border-stone-200 rounded-md p-3 bg-stone-50"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between text-sm text-stone-700 mb-2"
+  }, /*#__PURE__*/React.createElement("span", null, progress || 'Reading the screenshot…'), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-stone-400"
+  }, readPercent(progress), "%")), /*#__PURE__*/React.createElement("div", {
+    className: "h-1.5 bg-stone-200 rounded-full overflow-hidden"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "h-full bg-stone-800 transition-colors",
+    style: {
+      width: readPercent(progress) + '%'
+    }
+  })), /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-stone-400 mt-1.5"
+  }, "Long chats are read in sections. This can take a minute — leave the page open.")), hasChat && /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-2 mb-3"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: onClear,
@@ -13867,9 +13978,18 @@ function ChatImportModal({
     className: "text-sm font-medium text-stone-700"
   }, "Upload chat screenshots"), /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-stone-400 mt-2"
-  }, "Select several at once — each one is treated as a separate conversation and you say who it belongs to.")), phase === 'loading' && /*#__PURE__*/React.createElement("p", {
-    className: "text-sm text-stone-600 text-center py-8"
-  }, progress || 'Reading…'), phase === 'error' && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+  }, "Select several at once — each one is treated as a separate conversation and you say who it belongs to.")), phase === 'loading' && /*#__PURE__*/React.createElement("div", {
+    className: "py-8"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-600 text-center mb-3"
+  }, progress || 'Reading…'), /*#__PURE__*/React.createElement("div", {
+    className: "h-1.5 bg-stone-200 rounded-full overflow-hidden max-w-xs mx-auto"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "h-full bg-stone-800",
+    style: {
+      width: readPercent(progress) + '%'
+    }
+  }))), phase === 'error' && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-red-700 text-center py-4"
   }, errMsg), /*#__PURE__*/React.createElement("button", {
     type: "button",
