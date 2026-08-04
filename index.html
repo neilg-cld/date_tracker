@@ -398,7 +398,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-04 20:47 IST';
+const BUILD_STAMP = '2026-08-04 21:00 IST';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -3020,12 +3020,18 @@ function downloadIcs(person, entry, sequence) {
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '1.7.0', date: '2026-08-04', changes: [
+      ['added', 'Images can be pasted from the clipboard, or dragged in, as well as picked from the file dialog'],
+      ['added', 'Drop targets highlight, and the timeline accepts a dropped screenshot directly'],
+    ],
+  },
   {
     version: '1.6.0', date: '2026-08-04', changes: [
       ['fixed', 'Every API call was failing with a 400 — the temperature setting added in 1.4.0 is not accepted by this model'],
@@ -5722,10 +5728,8 @@ function ConversationSection({ chronology, summary, progress, onAddFiles, onDele
   const [openDetail, setOpenDetail] = useState({});
   const inputRef = React.useRef(null);
 
-  async function handleFiles(e) {
-    const files = Array.from(e.target.files || []);
-    e.target.value = '';
-    if (!files.length) return;
+  async function takeFiles(files) {
+    if (!files || !files.length) return;
     setBusy(true);
     setErr('');
     try {
@@ -5736,13 +5740,26 @@ function ConversationSection({ chronology, summary, progress, onAddFiles, onDele
     setBusy(false);
   }
 
+  async function handleFiles(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    await takeFiles(files);
+  }
+
+  // Paste only while nothing else is being typed into, so it does not hijack
+  // pasting text into a note.
+  const intake = useImageIntake(takeFiles, !busy);
+
   const hasChat = items.some(x => x.kind === 'chat');
   const lastIndex = items.length - 1;
 
   return (
-    <div className="bg-white border border-stone-200 rounded-lg p-4 mb-4">
+    <div {...intake.handlers}
+      className={`bg-white border rounded-lg p-4 mb-4 ${intake.dragging ? 'border-stone-900 bg-stone-50' : 'border-stone-200'}`}>
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-stone-700">Timeline</h3>
+        <h3 className="text-sm font-semibold text-stone-700">
+          Timeline{intake.dragging ? ' — drop to read it' : ''}
+        </h3>
         <div className="flex gap-1.5">
           <button onClick={onAddContact}
             className="flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100">
@@ -5988,6 +6005,42 @@ function DateTimelineCard({ entry, isLatest, onEdit, coachNote }) {
 
 // ---------- Profile import modal (creates a new person from a screenshot) ----------
 
+// A web page cannot choose what the system file picker offers, but it can accept
+// images arriving by other routes: pasted from the clipboard, or dragged in.
+function useImageIntake(onFiles, active) {
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    if (!active) return undefined;
+    function onPaste(e) {
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      const files = [];
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].kind === 'file' && String(items[i].type).startsWith('image/')) {
+          const f = items[i].getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length) { e.preventDefault(); onFiles(files); }
+    }
+    document.addEventListener('paste', onPaste);
+    return () => document.removeEventListener('paste', onPaste);
+  }, [active, onFiles]);
+
+  const handlers = {
+    onDragOver: (e) => { e.preventDefault(); setDragging(true); },
+    onDragLeave: (e) => { e.preventDefault(); setDragging(false); },
+    onDrop: (e) => {
+      e.preventDefault();
+      setDragging(false);
+      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || [])
+        .filter(f => String(f.type).startsWith('image/'));
+      if (files.length) onFiles(files);
+    },
+  };
+  return { dragging, handlers };
+}
+
 function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, knownChannels }) {
   const [phase, setPhase] = useState('upload'); // upload | choose | loading | review | error
   const [errMsg, setErrMsg] = useState('');
@@ -6031,10 +6084,8 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
     }
   }
 
-  function handleFiles(e) {
-    const files = Array.from(e.target.files || []);
-    e.target.value = '';
-    if (!files.length) return;
+  function takeFiles(files) {
+    if (!files || !files.length) return;
     resetDraft();
     if (files.length > 1) {
       setPending(files);
@@ -6045,6 +6096,14 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
     setQIndex(0);
     runOn(files);
   }
+
+  function handleFiles(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    takeFiles(files);
+  }
+
+  const intake = useImageIntake(takeFiles, phase === 'upload');
 
   function chooseSeparate() {
     setQueue(pending);
@@ -6119,11 +6178,15 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
         <div className="p-4 pb-32 space-y-3">
           <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFiles} />
           {phase === 'upload' && (
-            <div className="border border-dashed border-stone-300 rounded-md p-6 bg-stone-50 text-center">
+            <div {...intake.handlers}
+              className={`border border-dashed rounded-md p-6 text-center ${
+                intake.dragging ? 'border-stone-900 bg-stone-100' : 'border-stone-300 bg-stone-50'
+              }`}>
               <Camera className="w-6 h-6 mx-auto text-stone-400 mb-2" />
               <button type="button" onClick={() => inputRef.current && inputRef.current.click()} className="text-sm font-medium text-stone-700">
                 Upload profile screenshot(s)
               </button>
+              <p className="text-xs text-stone-500 mt-1">or paste an image, or drag one in</p>
               <p className="text-xs text-stone-400 mt-2">A tall scrolling screenshot works fine. Select several at once — you'll be asked whether they're separate people or parts of one profile.</p>
             </div>
           )}
@@ -6282,15 +6345,21 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose }) {
     }
   }
 
-  function handleFiles(e) {
-    const files = Array.from(e.target.files || []);
-    e.target.value = '';
-    if (!files.length) return;
+  function takeFiles(files) {
+    if (!files || !files.length) return;
     setQueue(files);
     setQIndex(0);
     setResults([]);
     process(files, 0);
   }
+
+  function handleFiles(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    takeFiles(files);
+  }
+
+  const chatIntake = useImageIntake(takeFiles, phase === 'upload');
 
   function next(from, note) {
     const results2 = note ? [...results, note] : results;
@@ -6335,11 +6404,15 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose }) {
           <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFiles} />
 
           {phase === 'upload' && (
-            <div className="border border-dashed border-stone-300 rounded-md p-6 bg-stone-50 text-center">
+            <div {...chatIntake.handlers}
+              className={`border border-dashed rounded-md p-6 text-center ${
+                chatIntake.dragging ? 'border-stone-900 bg-stone-100' : 'border-stone-300 bg-stone-50'
+              }`}>
               <MessageCircle className="w-6 h-6 mx-auto text-stone-400 mb-2" />
               <button type="button" onClick={() => inputRef.current && inputRef.current.click()} className="text-sm font-medium text-stone-700">
                 Upload chat screenshots
               </button>
+              <p className="text-xs text-stone-500 mt-1">or paste an image, or drag one in</p>
               <p className="text-xs text-stone-400 mt-2">Select several at once — each one is treated as a separate conversation and you say who it belongs to.</p>
             </div>
           )}
@@ -7280,7 +7353,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-04 20:47 IST';
+const BUILD_STAMP = '2026-08-04 21:00 IST';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -10157,12 +10230,16 @@ function downloadIcs(person, entry, sequence) {
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '1.7.0',
+  date: '2026-08-04',
+  changes: [['added', 'Images can be pasted from the clipboard, or dragged in, as well as picked from the file dialog'], ['added', 'Drop targets highlight, and the timeline accepts a dropped screenshot directly']]
+}, {
   version: '1.6.0',
   date: '2026-08-04',
   changes: [['fixed', 'Every API call was failing with a 400 — the temperature setting added in 1.4.0 is not accepted by this model'], ['added', 'Progress bar while a chat screenshot is being read, on the person page and in bulk import'], ['changed', 'Search moved to the top of the home screen, with a clear button'], ['changed', 'Header buttons shrunk to fit one line on a phone'], ['changed', 'Build stamp shows Irish time rather than UTC']]
@@ -13253,10 +13330,8 @@ function ConversationSection({
   const [err, setErr] = useState('');
   const [openDetail, setOpenDetail] = useState({});
   const inputRef = React.useRef(null);
-  async function handleFiles(e) {
-    const files = Array.from(e.target.files || []);
-    e.target.value = '';
-    if (!files.length) return;
+  async function takeFiles(files) {
+    if (!files || !files.length) return;
     setBusy(true);
     setErr('');
     try {
@@ -13266,15 +13341,25 @@ function ConversationSection({
     }
     setBusy(false);
   }
+  async function handleFiles(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    await takeFiles(files);
+  }
+
+  // Paste only while nothing else is being typed into, so it does not hijack
+  // pasting text into a note.
+  const intake = useImageIntake(takeFiles, !busy);
   const hasChat = items.some(x => x.kind === 'chat');
   const lastIndex = items.length - 1;
   return /*#__PURE__*/React.createElement("div", {
-    className: "bg-white border border-stone-200 rounded-lg p-4 mb-4"
+    ...intake.handlers,
+    className: `bg-white border rounded-lg p-4 mb-4 ${intake.dragging ? 'border-stone-900 bg-stone-50' : 'border-stone-200'}`
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between mb-3"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "text-sm font-semibold text-stone-700"
-  }, "Timeline"), /*#__PURE__*/React.createElement("div", {
+  }, "Timeline", intake.dragging ? ' — drop to read it' : ''), /*#__PURE__*/React.createElement("div", {
     className: "flex gap-1.5"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: onAddContact,
@@ -13516,6 +13601,50 @@ function DateTimelineCard({
 
 // ---------- Profile import modal (creates a new person from a screenshot) ----------
 
+// A web page cannot choose what the system file picker offers, but it can accept
+// images arriving by other routes: pasted from the clipboard, or dragged in.
+function useImageIntake(onFiles, active) {
+  const [dragging, setDragging] = useState(false);
+  useEffect(() => {
+    if (!active) return undefined;
+    function onPaste(e) {
+      const items = e.clipboardData && e.clipboardData.items || [];
+      const files = [];
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].kind === 'file' && String(items[i].type).startsWith('image/')) {
+          const f = items[i].getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length) {
+        e.preventDefault();
+        onFiles(files);
+      }
+    }
+    document.addEventListener('paste', onPaste);
+    return () => document.removeEventListener('paste', onPaste);
+  }, [active, onFiles]);
+  const handlers = {
+    onDragOver: e => {
+      e.preventDefault();
+      setDragging(true);
+    },
+    onDragLeave: e => {
+      e.preventDefault();
+      setDragging(false);
+    },
+    onDrop: e => {
+      e.preventDefault();
+      setDragging(false);
+      const files = Array.from(e.dataTransfer && e.dataTransfer.files || []).filter(f => String(f.type).startsWith('image/'));
+      if (files.length) onFiles(files);
+    }
+  };
+  return {
+    dragging,
+    handlers
+  };
+}
 function ProfileImportModal({
   onCancel,
   onCreate,
@@ -13567,10 +13696,8 @@ function ProfileImportModal({
       setPhase('error');
     }
   }
-  function handleFiles(e) {
-    const files = Array.from(e.target.files || []);
-    e.target.value = '';
-    if (!files.length) return;
+  function takeFiles(files) {
+    if (!files || !files.length) return;
     resetDraft();
     if (files.length > 1) {
       setPending(files);
@@ -13581,6 +13708,12 @@ function ProfileImportModal({
     setQIndex(0);
     runOn(files);
   }
+  function handleFiles(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    takeFiles(files);
+  }
+  const intake = useImageIntake(takeFiles, phase === 'upload');
   function chooseSeparate() {
     setQueue(pending);
     setQIndex(0);
@@ -13690,7 +13823,8 @@ function ProfileImportModal({
     className: "hidden",
     onChange: handleFiles
   }), phase === 'upload' && /*#__PURE__*/React.createElement("div", {
-    className: "border border-dashed border-stone-300 rounded-md p-6 bg-stone-50 text-center"
+    ...intake.handlers,
+    className: `border border-dashed rounded-md p-6 text-center ${intake.dragging ? 'border-stone-900 bg-stone-100' : 'border-stone-300 bg-stone-50'}`
   }, /*#__PURE__*/React.createElement(Camera, {
     className: "w-6 h-6 mx-auto text-stone-400 mb-2"
   }), /*#__PURE__*/React.createElement("button", {
@@ -13698,6 +13832,8 @@ function ProfileImportModal({
     onClick: () => inputRef.current && inputRef.current.click(),
     className: "text-sm font-medium text-stone-700"
   }, "Upload profile screenshot(s)"), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-500 mt-1"
+  }, "or paste an image, or drag one in"), /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-stone-400 mt-2"
   }, "A tall scrolling screenshot works fine. Select several at once — you'll be asked whether they're separate people or parts of one profile.")), phase === 'choose' && /*#__PURE__*/React.createElement("div", {
     className: "space-y-3"
@@ -13903,15 +14039,19 @@ function ChatImportModal({
       setPhase('error');
     }
   }
-  function handleFiles(e) {
-    const files = Array.from(e.target.files || []);
-    e.target.value = '';
-    if (!files.length) return;
+  function takeFiles(files) {
+    if (!files || !files.length) return;
     setQueue(files);
     setQIndex(0);
     setResults([]);
     process(files, 0);
   }
+  function handleFiles(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    takeFiles(files);
+  }
+  const chatIntake = useImageIntake(takeFiles, phase === 'upload');
   function next(from, note) {
     const results2 = note ? [...results, note] : results;
     setResults(results2);
@@ -13969,7 +14109,8 @@ function ChatImportModal({
     className: "hidden",
     onChange: handleFiles
   }), phase === 'upload' && /*#__PURE__*/React.createElement("div", {
-    className: "border border-dashed border-stone-300 rounded-md p-6 bg-stone-50 text-center"
+    ...chatIntake.handlers,
+    className: `border border-dashed rounded-md p-6 text-center ${chatIntake.dragging ? 'border-stone-900 bg-stone-100' : 'border-stone-300 bg-stone-50'}`
   }, /*#__PURE__*/React.createElement(MessageCircle, {
     className: "w-6 h-6 mx-auto text-stone-400 mb-2"
   }), /*#__PURE__*/React.createElement("button", {
@@ -13977,6 +14118,8 @@ function ChatImportModal({
     onClick: () => inputRef.current && inputRef.current.click(),
     className: "text-sm font-medium text-stone-700"
   }, "Upload chat screenshots"), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-500 mt-1"
+  }, "or paste an image, or drag one in"), /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-stone-400 mt-2"
   }, "Select several at once — each one is treated as a separate conversation and you say who it belongs to.")), phase === 'loading' && /*#__PURE__*/React.createElement("div", {
     className: "py-8"
