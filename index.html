@@ -398,7 +398,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-04 19:12';
+const BUILD_STAMP = '2026-08-04 19:26';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -1246,6 +1246,7 @@ function emptyProfile() {
 
 const PROFILE_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of ONE tall scrolling screenshot of a dating app profile (Hinge, Bumble, Tinder or similar), given top to bottom. Read every panel carefully — text may be small. Extract EVERYTHING visible and respond with ONLY a JSON object, no other text, no markdown fences, in exactly this shape:
 {
+"panelsRead": array of integers — the panel numbers you read and accounted for in this reply. List every panel you were given, including any that were blank or held nothing useful. This is checked.
 "name": string or null,
 "age": string or null,
 "hometown": string or null — her ORIGIN. Where she is from, grew up, or was born. Only from a field labelled Hometown / From / Originally from / Grew up in, or a clear statement of origin. A nationality or a foreign city named as her background counts. Where she lives now is NOT her origin.
@@ -2132,7 +2133,10 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
   await readSet(plans, 'Reading');
 
   // Check every panel was accounted for, and go back for any that were not.
-  for (let round = 0; round < COVERAGE_ROUNDS; round++) {
+  // If nothing reported coverage at all, there is nothing to check — chasing it
+  // would re-read the whole image for no reason.
+  const reportsCoverage = results.some(r => r && Array.isArray(r.panelsRead) && r.panelsRead.length);
+  for (let round = 0; reportsCoverage && round < COVERAGE_ROUNDS; round++) {
     const seen = new Set();
     results.forEach(r => (r && Array.isArray(r.panelsRead) ? r.panelsRead : []).forEach(n => seen.add(Number(n))));
     const missing = plans.filter(p => !seen.has(p.index) && !failed.has(p.index));
@@ -2149,24 +2153,34 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
   }
 
   const merged = merge ? merge(results) : results[0];
-  const seen = new Set((merged.panelsRead || []).map(Number));
-  const stillMissing = plans.filter(p => !seen.has(p.index)).map(p => p.index);
-  merged.coverage = { total, read: total - stillMissing.length, missing: stillMissing };
-  if (stillMissing.length) merged.failedSections = stillMissing;
+  if (reportsCoverage) {
+    const seen = new Set((merged.panelsRead || []).map(Number));
+    const stillMissing = plans.filter(p => !seen.has(p.index)).map(p => p.index);
+    merged.coverage = { total, read: total - stillMissing.length, missing: stillMissing };
+    if (stillMissing.length) merged.failedSections = stillMissing;
+  } else {
+    merged.coverage = { total, read: total, missing: [] };
+  }
   return merged;
 }
 
 function mergeProfileResults(results) {
-  const out = { photoRegions: [] };
+  const out = { photoRegions: [], panelsRead: [] };
   results.forEach(r => {
     Object.keys(r || {}).forEach(k => {
-      if (k === 'photoRegions') return;
+      if (k === 'photoRegions' || k === 'panelsRead') return;
       const v = r[k];
       if (v === null || v === undefined || v === '') return;
       if (Array.isArray(v)) out[k] = (out[k] || []).concat(v);
       else if (!out[k]) out[k] = v;
     });
-    if (Array.isArray(r && r.photoRegions)) out.photoRegions = out.photoRegions.concat(r.photoRegions);
+    (Array.isArray(r && r.photoRegions) ? r.photoRegions : []).forEach(reg => {
+      const k = [reg.panel, Math.round((reg.x || 0) * 50), Math.round((reg.y || 0) * 50),
+        Math.round((reg.width || 0) * 50), Math.round((reg.height || 0) * 50)].join(':');
+      if (!out.photoRegions.some(x => [x.panel, Math.round((x.x || 0) * 50), Math.round((x.y || 0) * 50),
+        Math.round((x.width || 0) * 50), Math.round((x.height || 0) * 50)].join(':') === k)) out.photoRegions.push(reg);
+    });
+    if (Array.isArray(r && r.panelsRead)) out.panelsRead = out.panelsRead.concat(r.panelsRead.map(Number).filter(n => n > 0));
   });
   return out;
 }
@@ -2195,11 +2209,18 @@ function mergeChatResults(results) {
         out.sessions.push(byDate[key]);
       }
     });
-    if (Array.isArray(r.phoneNumbers)) out.phoneNumbers = out.phoneNumbers.concat(r.phoneNumbers);
-    if (Array.isArray(r.relativeDayMarkers)) out.relativeDayMarkers = out.relativeDayMarkers.concat(r.relativeDayMarkers);
+    (Array.isArray(r.phoneNumbers) ? r.phoneNumbers : []).forEach(n => {
+      if (!out.phoneNumbers.includes(n)) out.phoneNumbers.push(n);
+    });
+    (Array.isArray(r.relativeDayMarkers) ? r.relativeDayMarkers : []).forEach(mk => {
+      if (!out.relativeDayMarkers.includes(mk)) out.relativeDayMarkers.push(mk);
+    });
     if (Array.isArray(r.panelsRead)) out.panelsRead = (out.panelsRead || []).concat(r.panelsRead.map(Number).filter(n => n > 0));
     if (Array.isArray(r.dateEvidence)) out.dateEvidence = (out.dateEvidence || []).concat(r.dateEvidence.filter(Boolean));
-    if (Array.isArray(r.dateEvents)) out.dateEvents = out.dateEvents.concat(r.dateEvents);
+    (Array.isArray(r.dateEvents) ? r.dateEvents : []).forEach(ev => {
+      const k = suggestionKey(ev);
+      if (!out.dateEvents.some(x => suggestionKey(x) === k)) out.dateEvents.push(ev);
+    });
     // Sections often describe the same overall arc; don't repeat it.
     if (r.summary && !normaliseMsg(out.summary).includes(normaliseMsg(r.summary).slice(0, 40))) {
       out.summary = (out.summary + ' ' + r.summary).trim();
@@ -2981,12 +3002,19 @@ function downloadIcs(person, entry, sequence) {
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '1.5.1', date: '2026-08-04', changes: [
+      ['fixed', 'Screenshot reading broke in 1.5.0: coverage checking re-read the whole image repeatedly and duplicated the results'],
+      ['fixed', 'Profile import made three times the API calls and produced duplicate photos'],
+      ['added', 'Duplicate suppression for dates, phone numbers and photo regions found in more than one pass'],
+    ],
+  },
   {
     version: '1.5.0', date: '2026-08-04', changes: [
       ['added', 'Import reports the date range a chat covers, before and after saving'],
@@ -7167,7 +7195,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-04 19:12';
+const BUILD_STAMP = '2026-08-04 19:26';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -8144,6 +8172,7 @@ function emptyProfile() {
 }
 const PROFILE_EXTRACT_PROMPT = `These images are consecutive vertical PANELS of ONE tall scrolling screenshot of a dating app profile (Hinge, Bumble, Tinder or similar), given top to bottom. Read every panel carefully — text may be small. Extract EVERYTHING visible and respond with ONLY a JSON object, no other text, no markdown fences, in exactly this shape:
 {
+"panelsRead": array of integers — the panel numbers you read and accounted for in this reply. List every panel you were given, including any that were blank or held nothing useful. This is checked.
 "name": string or null,
 "age": string or null,
 "hometown": string or null — her ORIGIN. Where she is from, grew up, or was born. Only from a field labelled Hometown / From / Originally from / Grew up in, or a clear statement of origin. A nationality or a foreign city named as her background counts. Where she lives now is NOT her origin.
@@ -9144,7 +9173,10 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
   await readSet(plans, 'Reading');
 
   // Check every panel was accounted for, and go back for any that were not.
-  for (let round = 0; round < COVERAGE_ROUNDS; round++) {
+  // If nothing reported coverage at all, there is nothing to check — chasing it
+  // would re-read the whole image for no reason.
+  const reportsCoverage = results.some(r => r && Array.isArray(r.panelsRead) && r.panelsRead.length);
+  for (let round = 0; reportsCoverage && round < COVERAGE_ROUNDS; round++) {
     const seen = new Set();
     results.forEach(r => (r && Array.isArray(r.panelsRead) ? r.panelsRead : []).forEach(n => seen.add(Number(n))));
     const missing = plans.filter(p => !seen.has(p.index) && !failed.has(p.index));
@@ -9159,28 +9191,41 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
     throw err;
   }
   const merged = merge ? merge(results) : results[0];
-  const seen = new Set((merged.panelsRead || []).map(Number));
-  const stillMissing = plans.filter(p => !seen.has(p.index)).map(p => p.index);
-  merged.coverage = {
-    total,
-    read: total - stillMissing.length,
-    missing: stillMissing
-  };
-  if (stillMissing.length) merged.failedSections = stillMissing;
+  if (reportsCoverage) {
+    const seen = new Set((merged.panelsRead || []).map(Number));
+    const stillMissing = plans.filter(p => !seen.has(p.index)).map(p => p.index);
+    merged.coverage = {
+      total,
+      read: total - stillMissing.length,
+      missing: stillMissing
+    };
+    if (stillMissing.length) merged.failedSections = stillMissing;
+  } else {
+    merged.coverage = {
+      total,
+      read: total,
+      missing: []
+    };
+  }
   return merged;
 }
 function mergeProfileResults(results) {
   const out = {
-    photoRegions: []
+    photoRegions: [],
+    panelsRead: []
   };
   results.forEach(r => {
     Object.keys(r || {}).forEach(k => {
-      if (k === 'photoRegions') return;
+      if (k === 'photoRegions' || k === 'panelsRead') return;
       const v = r[k];
       if (v === null || v === undefined || v === '') return;
       if (Array.isArray(v)) out[k] = (out[k] || []).concat(v);else if (!out[k]) out[k] = v;
     });
-    if (Array.isArray(r && r.photoRegions)) out.photoRegions = out.photoRegions.concat(r.photoRegions);
+    (Array.isArray(r && r.photoRegions) ? r.photoRegions : []).forEach(reg => {
+      const k = [reg.panel, Math.round((reg.x || 0) * 50), Math.round((reg.y || 0) * 50), Math.round((reg.width || 0) * 50), Math.round((reg.height || 0) * 50)].join(':');
+      if (!out.photoRegions.some(x => [x.panel, Math.round((x.x || 0) * 50), Math.round((x.y || 0) * 50), Math.round((x.width || 0) * 50), Math.round((x.height || 0) * 50)].join(':') === k)) out.photoRegions.push(reg);
+    });
+    if (Array.isArray(r && r.panelsRead)) out.panelsRead = out.panelsRead.concat(r.panelsRead.map(Number).filter(n => n > 0));
   });
   return out;
 }
@@ -9219,11 +9264,18 @@ function mergeChatResults(results) {
         out.sessions.push(byDate[key]);
       }
     });
-    if (Array.isArray(r.phoneNumbers)) out.phoneNumbers = out.phoneNumbers.concat(r.phoneNumbers);
-    if (Array.isArray(r.relativeDayMarkers)) out.relativeDayMarkers = out.relativeDayMarkers.concat(r.relativeDayMarkers);
+    (Array.isArray(r.phoneNumbers) ? r.phoneNumbers : []).forEach(n => {
+      if (!out.phoneNumbers.includes(n)) out.phoneNumbers.push(n);
+    });
+    (Array.isArray(r.relativeDayMarkers) ? r.relativeDayMarkers : []).forEach(mk => {
+      if (!out.relativeDayMarkers.includes(mk)) out.relativeDayMarkers.push(mk);
+    });
     if (Array.isArray(r.panelsRead)) out.panelsRead = (out.panelsRead || []).concat(r.panelsRead.map(Number).filter(n => n > 0));
     if (Array.isArray(r.dateEvidence)) out.dateEvidence = (out.dateEvidence || []).concat(r.dateEvidence.filter(Boolean));
-    if (Array.isArray(r.dateEvents)) out.dateEvents = out.dateEvents.concat(r.dateEvents);
+    (Array.isArray(r.dateEvents) ? r.dateEvents : []).forEach(ev => {
+      const k = suggestionKey(ev);
+      if (!out.dateEvents.some(x => suggestionKey(x) === k)) out.dateEvents.push(ev);
+    });
     // Sections often describe the same overall arc; don't repeat it.
     if (r.summary && !normaliseMsg(out.summary).includes(normaliseMsg(r.summary).slice(0, 40))) {
       out.summary = (out.summary + ' ' + r.summary).trim();
@@ -10007,12 +10059,16 @@ function downloadIcs(person, entry, sequence) {
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '1.5.1',
+  date: '2026-08-04',
+  changes: [['fixed', 'Screenshot reading broke in 1.5.0: coverage checking re-read the whole image repeatedly and duplicated the results'], ['fixed', 'Profile import made three times the API calls and produced duplicate photos'], ['added', 'Duplicate suppression for dates, phone numbers and photo regions found in more than one pass']]
+}, {
   version: '1.5.0',
   date: '2026-08-04',
   changes: [['added', 'Import reports the date range a chat covers, before and after saving'], ['added', 'The reader hunts for date evidence — dividers, timestamps, match banners, the phone status bar — and reports what it found'], ['fixed', 'Historical chats were dragged to the present: relative dividers now resolve against the dates in the same image'], ['changed', 'A weekday divider reads forward from the date above it, so "Monday" between 14 and 20 July 2024 is the 15th'], ['changed', 'Undated sessions sit with their neighbours rather than defaulting to today']]
