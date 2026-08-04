@@ -398,7 +398,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-04 19:26';
+const BUILD_STAMP = '2026-08-04 19:34';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -1628,7 +1628,7 @@ async function extractChatPayload(files, onProgress) {
     const dated = CONVERSATION_EXTRACT_PROMPT + '\n\nToday is '
       + today.toLocaleDateString('en-IE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
       + ' (' + TODAY() + '). Resolve every divider against that.';
-    const fields = await extractFromScreenshot(file, dated, 3500, mergeChatResults, onProgress, w => imageWarnings.push(w));
+    const fields = await extractFromScreenshot(file, dated, 8000, mergeChatResults, onProgress, w => imageWarnings.push(w));
     if (fields.summary) summaryParts.push(fields.summary);
     if (Array.isArray(fields.sessions)) sessions = sessions.concat(fields.sessions);
     if (Array.isArray(fields.phoneNumbers)) phoneNumbers = phoneNumbers.concat(fields.phoneNumbers);
@@ -2035,7 +2035,7 @@ function wrapApiError(message) {
 // One call with every panel is best — the model sees the whole profile at once.
 // If that fails (too many images, a truncated reply, a transient API error) fall
 // back to reading three panels at a time and stitching the answers together.
-const PANELS_PER_CHUNK = 4;
+const PANELS_PER_CHUNK = 3;
 const SINGLE_PASS_LIMIT = 5;   // above this, go straight to sections
 
 const SECTION_ATTEMPTS = 3;       // a section gets three goes before it is called failed
@@ -2044,44 +2044,60 @@ const COVERAGE_ROUNDS = 2;        // then two rounds of re-reading whatever was 
 async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgress) {
   const total = plans.length;
 
-  const runChunk = async (chunk) => {
+  const runChunk = async (chunk, extraInstruction, tokens) => {
     const blocks = [];
     chunk.forEach(plan => {
       blocks.push({ type: 'text', text: `Panel ${plan.index} of ${total} (vertical ${Math.round(plan.y0 * 100)}%–${Math.round(plan.y1 * 100)}% of the full screenshot):` });
       blocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: renderPanel(imgEl, plan) } });
     });
-    blocks.push({ type: 'text', text: prompt });
+    blocks.push({ type: 'text', text: prompt + (extraInstruction ? '\n\n' + extraInstruction : '') });
     try {
-      return await callVision(blocks, maxTokens || 4000);
+      return await callVision(blocks, tokens || maxTokens || 4000);
     } finally {
       blocks.forEach(b => { if (b.type === 'image') b.source.data = null; });
     }
   };
 
-  // A section that fails is retried rather than written off. Most failures are
-  // transient: a truncated reply, a dropped connection, a malformed object.
+  // Sampling is deterministic, so a plain repeat of a failed request fails the
+  // same way. Every attempt therefore changes the ask: more room, then a much
+  // shorter answer.
+  const ATTEMPT_PLAN = [
+    { extra: null, factor: 1 },
+    {
+      extra: 'Your previous reply did not come back usable. Return valid, complete JSON this time. '
+        + 'Keep it compact: at most 4 points per session, and shorter summaries.',
+      factor: 2,
+    },
+    {
+      extra: 'Keep this reply very short. Give the summary and facts for each session and set "points" to an empty array. '
+        + 'A complete short answer is far better than a long one that gets cut off.',
+      factor: 2,
+    },
+  ];
+
   const runChunkWithRetries = async (chunk, label) => {
     let lastErr = null;
-    for (let attempt = 1; attempt <= SECTION_ATTEMPTS; attempt++) {
+    let salvaged = null;
+    for (let attempt = 0; attempt < ATTEMPT_PLAN.length; attempt++) {
+      const plan = ATTEMPT_PLAN[attempt];
       try {
-        const res = await runChunk(chunk);
+        const res = await runChunk(chunk, plan.extra, Math.round((maxTokens || 4000) * plan.factor));
         const got = Array.isArray(res && res.sessions) ? res.sessions.length : 1;
-        // An empty reply for panels that plainly hold a conversation is a failure
-        // too — try again before accepting it.
-        if (got === 0 && attempt < SECTION_ATTEMPTS) {
-          lastErr = new Error('nothing read');
-          await new Promise(r => setTimeout(r, 400 * attempt));
+        if (got === 0 && attempt < ATTEMPT_PLAN.length - 1) {
+          lastErr = new Error('the section came back empty');
           continue;
         }
         return res;
       } catch (e) {
         if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
         lastErr = e;
-        if (e.partial && attempt === SECTION_ATTEMPTS) return e.partial;
-        if (onProgress) onProgress(label + ' — retrying (' + attempt + ' of ' + SECTION_ATTEMPTS + ')…');
-        await new Promise(r => setTimeout(r, 600 * attempt));
+        if (e.partial) salvaged = e.partial;
+        if (onProgress) onProgress(label + ' — retrying (' + (attempt + 2) + ' of ' + ATTEMPT_PLAN.length + ')…');
+        await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
       }
     }
+    // Anything recovered from a truncated reply beats nothing at all.
+    if (salvaged) return salvaged;
     throw lastErr || new Error('section failed');
   };
 
@@ -2104,6 +2120,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
 
   const results = [];
   const failed = new Set();
+  let lastError = null;
 
   async function readSet(list, roundLabel) {
     const chunks = chunkOf(list);
@@ -2118,6 +2135,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
           slots[i] = await runChunkWithRetries(chunks[i], label);
         } catch (e) {
           if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+          lastError = e;
           chunks[i].forEach(p => failed.add(p.index));
         }
         done += 1;
@@ -2147,7 +2165,8 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
   }
 
   if (!results.length) {
-    const err = wrapApiError('None of the sections could be read.');
+    const err = wrapApiError('None of the sections could be read'
+      + (lastError && lastError.message ? '. Last error: ' + lastError.message : '.'));
     err.code = 'ALL_SECTIONS_FAILED';
     throw err;
   }
@@ -3002,12 +3021,20 @@ function downloadIcs(person, entry, sequence) {
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.5.2';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '1.5.2', date: '2026-08-04', changes: [
+      ['fixed', 'Reading could fail outright: at temperature 0 a retry repeated the identical failed request, so three attempts failed the same way'],
+      ['changed', 'Each retry now changes the ask — more room, then a much shorter answer — instead of repeating itself'],
+      ['changed', 'Sections are three panels instead of four, and have 8,000 tokens to reply in'],
+      ['fixed', 'The real reason a read failed is now shown instead of a generic message'],
+    ],
+  },
   {
     version: '1.5.1', date: '2026-08-04', changes: [
       ['fixed', 'Screenshot reading broke in 1.5.0: coverage checking re-read the whole image repeatedly and duplicated the results'],
@@ -7195,7 +7222,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-04 19:26';
+const BUILD_STAMP = '2026-08-04 19:34';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -8598,7 +8625,7 @@ async function extractChatPayload(files, onProgress) {
       month: 'long',
       year: 'numeric'
     }) + ' (' + TODAY() + '). Resolve every divider against that.';
-    const fields = await extractFromScreenshot(file, dated, 3500, mergeChatResults, onProgress, w => imageWarnings.push(w));
+    const fields = await extractFromScreenshot(file, dated, 8000, mergeChatResults, onProgress, w => imageWarnings.push(w));
     if (fields.summary) summaryParts.push(fields.summary);
     if (Array.isArray(fields.sessions)) sessions = sessions.concat(fields.sessions);
     if (Array.isArray(fields.phoneNumbers)) phoneNumbers = phoneNumbers.concat(fields.phoneNumbers);
@@ -9063,7 +9090,7 @@ function wrapApiError(message) {
 // One call with every panel is best — the model sees the whole profile at once.
 // If that fails (too many images, a truncated reply, a transient API error) fall
 // back to reading three panels at a time and stitching the answers together.
-const PANELS_PER_CHUNK = 4;
+const PANELS_PER_CHUNK = 3;
 const SINGLE_PASS_LIMIT = 5; // above this, go straight to sections
 
 const SECTION_ATTEMPTS = 3; // a section gets three goes before it is called failed
@@ -9071,7 +9098,7 @@ const COVERAGE_ROUNDS = 2; // then two rounds of re-reading whatever was missed
 
 async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgress) {
   const total = plans.length;
-  const runChunk = async chunk => {
+  const runChunk = async (chunk, extraInstruction, tokens) => {
     const blocks = [];
     chunk.forEach(plan => {
       blocks.push({
@@ -9089,10 +9116,10 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
     });
     blocks.push({
       type: 'text',
-      text: prompt
+      text: prompt + (extraInstruction ? '\n\n' + extraInstruction : '')
     });
     try {
-      return await callVision(blocks, maxTokens || 4000);
+      return await callVision(blocks, tokens || maxTokens || 4000);
     } finally {
       blocks.forEach(b => {
         if (b.type === 'image') b.source.data = null;
@@ -9100,30 +9127,42 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
     }
   };
 
-  // A section that fails is retried rather than written off. Most failures are
-  // transient: a truncated reply, a dropped connection, a malformed object.
+  // Sampling is deterministic, so a plain repeat of a failed request fails the
+  // same way. Every attempt therefore changes the ask: more room, then a much
+  // shorter answer.
+  const ATTEMPT_PLAN = [{
+    extra: null,
+    factor: 1
+  }, {
+    extra: 'Your previous reply did not come back usable. Return valid, complete JSON this time. ' + 'Keep it compact: at most 4 points per session, and shorter summaries.',
+    factor: 2
+  }, {
+    extra: 'Keep this reply very short. Give the summary and facts for each session and set "points" to an empty array. ' + 'A complete short answer is far better than a long one that gets cut off.',
+    factor: 2
+  }];
   const runChunkWithRetries = async (chunk, label) => {
     let lastErr = null;
-    for (let attempt = 1; attempt <= SECTION_ATTEMPTS; attempt++) {
+    let salvaged = null;
+    for (let attempt = 0; attempt < ATTEMPT_PLAN.length; attempt++) {
+      const plan = ATTEMPT_PLAN[attempt];
       try {
-        const res = await runChunk(chunk);
+        const res = await runChunk(chunk, plan.extra, Math.round((maxTokens || 4000) * plan.factor));
         const got = Array.isArray(res && res.sessions) ? res.sessions.length : 1;
-        // An empty reply for panels that plainly hold a conversation is a failure
-        // too — try again before accepting it.
-        if (got === 0 && attempt < SECTION_ATTEMPTS) {
-          lastErr = new Error('nothing read');
-          await new Promise(r => setTimeout(r, 400 * attempt));
+        if (got === 0 && attempt < ATTEMPT_PLAN.length - 1) {
+          lastErr = new Error('the section came back empty');
           continue;
         }
         return res;
       } catch (e) {
         if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
         lastErr = e;
-        if (e.partial && attempt === SECTION_ATTEMPTS) return e.partial;
-        if (onProgress) onProgress(label + ' — retrying (' + attempt + ' of ' + SECTION_ATTEMPTS + ')…');
-        await new Promise(r => setTimeout(r, 600 * attempt));
+        if (e.partial) salvaged = e.partial;
+        if (onProgress) onProgress(label + ' — retrying (' + (attempt + 2) + ' of ' + ATTEMPT_PLAN.length + ')…');
+        await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
       }
     }
+    // Anything recovered from a truncated reply beats nothing at all.
+    if (salvaged) return salvaged;
     throw lastErr || new Error('section failed');
   };
   if (total <= SINGLE_PASS_LIMIT) {
@@ -9143,6 +9182,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
   };
   const results = [];
   const failed = new Set();
+  let lastError = null;
   async function readSet(list, roundLabel) {
     const chunks = chunkOf(list);
     const slots = new Array(chunks.length).fill(null);
@@ -9157,6 +9197,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
           slots[i] = await runChunkWithRetries(chunks[i], label);
         } catch (e) {
           if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+          lastError = e;
           chunks[i].forEach(p => failed.add(p.index));
         }
         done += 1;
@@ -9186,7 +9227,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
     await readSet(missing, 'Second look');
   }
   if (!results.length) {
-    const err = wrapApiError('None of the sections could be read.');
+    const err = wrapApiError('None of the sections could be read' + (lastError && lastError.message ? '. Last error: ' + lastError.message : '.'));
     err.code = 'ALL_SECTIONS_FAILED';
     throw err;
   }
@@ -10059,12 +10100,16 @@ function downloadIcs(person, entry, sequence) {
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.5.2';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '1.5.2',
+  date: '2026-08-04',
+  changes: [['fixed', 'Reading could fail outright: at temperature 0 a retry repeated the identical failed request, so three attempts failed the same way'], ['changed', 'Each retry now changes the ask — more room, then a much shorter answer — instead of repeating itself'], ['changed', 'Sections are three panels instead of four, and have 8,000 tokens to reply in'], ['fixed', 'The real reason a read failed is now shown instead of a generic message']]
+}, {
   version: '1.5.1',
   date: '2026-08-04',
   changes: [['fixed', 'Screenshot reading broke in 1.5.0: coverage checking re-read the whole image repeatedly and duplicated the results'], ['fixed', 'Profile import made three times the API calls and produced duplicate photos'], ['added', 'Duplicate suppression for dates, phone numbers and photo regions found in more than one pass']]
