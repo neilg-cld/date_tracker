@@ -398,7 +398,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-04 18:25';
+const BUILD_STAMP = '2026-08-04 19:12';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -1296,6 +1296,8 @@ WORK OUT WHO IS WHO BEFORE YOU SUMMARISE. This is the part that goes wrong most 
 - "Delivered", "Read" and "Sent" appear under the USER's messages; a small avatar usually sits beside HERS.
 - Sense-check: if a message answers a question, it was written by whoever did not ask it. If your attribution has one person asking and answering their own questions, flip it.
 
+IGNORE PHOTOS AND MEDIA. Do not look into, describe, or interpret any image, photo, video, sticker, GIF, voice note or link preview inside the conversation. Do not spend effort on them. If one clearly carries a fact worth keeping — she sent a picture of her new dog, or a screenshot of a venue you then agreed on — record that fact in one short line and move on. Otherwise skip it entirely and never write a line that only says a photo was sent.
+
 IGNORE THE FURNITURE. A screenshot is full of things neither of you said. None of the following is ever a message, a fact, a session or an event, and none of it belongs in your output: the app's encryption notice ("Messages and calls are end-to-end encrypted"), disappearing-message notices, "You matched", "Say hi", blocked/report banners, delivery and read receipts, typing indicators, "Missed voice call" rows, date dividers themselves, unread-count separators, stickers and reaction badges, and any advertising or safety prompt the app inserts. If a whole session contains nothing but this, leave it out entirely.
 
 READ IT LIKE A PERSON, NOT A PARSER. You are summarising a conversation between two adults for the man's own private record. Judge what actually mattered:
@@ -1309,6 +1311,8 @@ SPLIT THE CHAT INTO SESSIONS. A session is one continuous burst of conversation 
 
 Respond with ONLY a JSON object, no other text, no markdown fences:
 {
+"dateEvidence": array of short strings — every piece of date evidence you found and where, e.g. "divider '14 July 2024' above panel 2", "timestamp 19:42 beside her first message", "matched banner: 3 July". Empty array only if the image genuinely carries none.
+"panelsRead": array of integers — the panel numbers you actually read and accounted for in this reply, e.g. [4,5,6,7]. List every panel you were given. If a panel was blank, unreadable or held nothing but app furniture, still list it — you have accounted for it. This is checked, so do not guess.
 "contactName": string or null (her name from the chat header — not the user's own name),
 "userSide": "left" or "right" or null,
 "attributionConfidence": "high" or "low",
@@ -1328,6 +1332,20 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 "summary": string — two or three sentences addressed to him on where the whole conversation stands: tone, momentum, anything agreed or left open. Second person throughout.
 "phoneNumbers": array of strings.
 }
+FIND THE DATES. Every chat screenshot contains date evidence somewhere — look for it properly before giving up, and search the whole image, not just the top:
+- Day dividers between messages ("Today", "Yesterday", "Monday", "14 July", "14/07/2024").
+- Timestamps beside individual messages, which often carry a date on the first message of a day.
+- The "you matched on" or "you connected on" banner.
+- The phone's own status bar if it is visible in the capture.
+- Dates written inside the messages themselves ("see you on the 14th", "happy new year").
+If you can see only one date in the whole image, that is still enough: anchor everything else to it.
+
+THIS CHAT MAY BE OLD. He is building a historical record and may import a conversation from months or years ago. Do not assume it is recent:
+- If any divider or timestamp carries a year, use that year for the whole screenshot unless another year is shown.
+- Resolve a relative divider ("Yesterday", "Monday") against the nearest ABSOLUTE date in the same image, not against today's date. "Monday" sitting between "14 July 2024" and "20 July 2024" is 15 July 2024.
+- Only fall back to today's date when the image carries no absolute date anywhere.
+Report what you found in "dateEvidence" so it can be checked.
+
 RESOLVING DATES. You are told today's date below. Chat apps write dividers in several styles and you must convert every one of them to YYYY-MM-DD:
 - "Today" → today's date. "Yesterday" → the day before.
 - A weekday alone ("Monday", "Sat") → the most recent such weekday on or before today.
@@ -1599,6 +1617,8 @@ async function extractChatPayload(files, onProgress) {
   let contactName = null, matchedDate = null, appName = null, lowConfidence = false, threadStart = false;
   let failedSections = [];
   const imageWarnings = [];
+  const coverage = { total: 0, read: 0, missing: [] };
+  let dateEvidence = [];
   let n = 0;
   for (const file of files) {
     n += 1;
@@ -1619,12 +1639,20 @@ async function extractChatPayload(files, onProgress) {
     if (fields.attributionConfidence === 'low') lowConfidence = true;
     if (fields.threadStart === true) threadStart = true;
     if (Array.isArray(fields.failedSections)) failedSections = failedSections.concat(fields.failedSections);
+    if (Array.isArray(fields.dateEvidence)) dateEvidence = dateEvidence.concat(fields.dateEvidence);
+    if (fields.coverage) {
+      coverage.total += fields.coverage.total;
+      coverage.read += fields.coverage.read;
+      coverage.missing = coverage.missing.concat(fields.coverage.missing || []);
+    }
   }
   const totalPoints = sessions.reduce((sum, ses) => sum + ((ses && ses.points) || []).length, 0);
   return {
     sessions: sessions.filter(Boolean),
     summary: summaryParts.join(' '), phoneNumbers, contactName, matchedDate, appName, dateEvents, threadStart,
-    failedSections, imageWarnings,
+    failedSections, imageWarnings, coverage,
+    dateEvidence,
+    dateRange: sessionDateRange(datedSessions(sessions.filter(Boolean), null)),
     markers: Array.from(new Set(markers.filter(Boolean))),
     lowConfidence,
     totalPoints,
@@ -1640,7 +1668,7 @@ const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
   'august', 'september', 'october', 'november', 'december'];
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-function parseDayLabel(label, todayIso) {
+function parseDayLabel(label, todayIso, forward) {
   if (!label) return null;
   const t = String(label).trim().toLowerCase();
   const today = todayIso || TODAY();
@@ -1672,8 +1700,13 @@ function parseDayLabel(label, todayIso) {
 
   const wd = WEEKDAYS.findIndex(d => t.includes(d.slice(0, 3)));
   if (wd > -1) {
-    const todayDow = new Date(today + 'T00:00:00').getDay();
-    const back = (todayDow - wd + 7) % 7;
+    const dow = new Date(today + 'T00:00:00').getDay();
+    if (forward) {
+      // Reading down a chat, a weekday divider comes after the date above it.
+      const ahead = (wd - dow + 7) % 7;
+      return shiftDate(today, ahead === 0 ? 7 : ahead);
+    }
+    const back = (dow - wd + 7) % 7;
     return shiftDate(today, -back);
   }
   return null;
@@ -1681,18 +1714,66 @@ function parseDayLabel(label, todayIso) {
 
 // Undated sessions take the confirmed date; if several sessions share it they
 // stay in the order they appeared.
+// A label carries its own year, so it can be trusted on its own.
+function labelIsAbsolute(label) {
+  const t = String(label || '').toLowerCase();
+  return /\b(19|20)\d{2}\b/.test(t);
+}
+
 function datedSessions(sessions, fallbackDate) {
-  const resolved = (sessions || []).filter(Boolean).map(ses => ({
-    ...ses,
-    date: ses.date || parseDayLabel(ses.dayLabel, TODAY()) || null,
-  }));
-  const known = resolved.filter(ses => ses.date).map(ses => ses.date);
-  const firstKnown = known.length ? known[0] : null;
-  return resolved.map((ses, i) => ({
-    ...ses,
-    date: ses.date || fallbackDate || firstKnown || TODAY(),
-    order: i,
-  }));
+  const list = (sessions || []).filter(Boolean).map(ses => ({ ...ses }));
+
+  // 1. Trust what the model dated, and any label carrying a year.
+  list.forEach(ses => {
+    if (!ses.date && labelIsAbsolute(ses.dayLabel)) ses.date = parseDayLabel(ses.dayLabel, TODAY());
+  });
+
+  const anchorFor = (i) => {
+    for (let j = i - 1; j >= 0; j--) if (list[j].date) return list[j].date;
+    for (let j = i + 1; j < list.length; j++) if (list[j].date) return list[j].date;
+    return null;
+  };
+
+  // 2. Resolve relative labels against the nearest dated session, not today —
+  //    otherwise "Monday" in a chat from 2024 lands in this week.
+  // The most recent absolute date in the image stands in for "today" when the
+  // screenshot itself is old.
+  const absolutes = list.map(x => x.date).filter(Boolean).sort();
+  const latestAbsolute = absolutes.length ? absolutes[absolutes.length - 1] : null;
+
+  list.forEach((ses, i) => {
+    if (ses.date || !ses.dayLabel) return;
+    let before = null;
+    for (let j = i - 1; j >= 0; j--) if (list[j].date) { before = list[j].date; break; }
+    const relativeToNow = /today|tonight|yesterday/i.test(ses.dayLabel);
+    if (relativeToNow) {
+      const base = (latestAbsolute && latestAbsolute < TODAY()) ? latestAbsolute : TODAY();
+      ses.date = parseDayLabel(ses.dayLabel, base);
+      return;
+    }
+    // Read forward from the date above it, or back from the one below.
+    ses.date = before
+      ? parseDayLabel(ses.dayLabel, before, true)
+      : parseDayLabel(ses.dayLabel, anchorFor(i) || TODAY());
+  });
+
+  // 3. Sessions with no label at all sit with their neighbours.
+  list.forEach((ses, i) => { if (!ses.date) ses.date = anchorFor(i); });
+
+  // 4. Only now fall back to the date he confirmed, or today.
+  return list.map((ses, i) => ({ ...ses, date: ses.date || fallbackDate || TODAY(), order: i }));
+}
+
+function sessionDateRange(sessions) {
+  const dates = (sessions || []).map(s => s.date).filter(Boolean).sort();
+  if (!dates.length) return null;
+  return { first: dates[0], last: dates[dates.length - 1] };
+}
+
+function formatDateRange(range) {
+  if (!range) return '';
+  if (range.first === range.last) return formatDayLabel(range.first);
+  return formatDayLabel(range.first) + ' to ' + formatDayLabel(range.last);
 }
 
 // Merge new sessions into the person's day timeline: one entry per date, facts
@@ -1846,6 +1927,9 @@ async function callVision(contentBlocks, maxTokens, attempt) {
       body: JSON.stringify({
         model: 'claude-sonnet-5',
         max_tokens: maxTokens || 800,
+        // Nothing here benefits from creative variation, and variation is exactly
+        // what makes two reads of one screenshot disagree.
+        temperature: 0,
         messages: [{ role: 'user', content: contentBlocks }],
       }),
     });
@@ -1953,6 +2037,9 @@ function wrapApiError(message) {
 const PANELS_PER_CHUNK = 4;
 const SINGLE_PASS_LIMIT = 5;   // above this, go straight to sections
 
+const SECTION_ATTEMPTS = 3;       // a section gets three goes before it is called failed
+const COVERAGE_ROUNDS = 2;        // then two rounds of re-reading whatever was missed
+
 async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgress) {
   const total = plans.length;
 
@@ -1966,64 +2053,106 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
     try {
       return await callVision(blocks, maxTokens || 4000);
     } finally {
-      // Drop the encoded pixels as soon as the request is done with them.
       blocks.forEach(b => { if (b.type === 'image') b.source.data = null; });
     }
   };
 
+  // A section that fails is retried rather than written off. Most failures are
+  // transient: a truncated reply, a dropped connection, a malformed object.
+  const runChunkWithRetries = async (chunk, label) => {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= SECTION_ATTEMPTS; attempt++) {
+      try {
+        const res = await runChunk(chunk);
+        const got = Array.isArray(res && res.sessions) ? res.sessions.length : 1;
+        // An empty reply for panels that plainly hold a conversation is a failure
+        // too — try again before accepting it.
+        if (got === 0 && attempt < SECTION_ATTEMPTS) {
+          lastErr = new Error('nothing read');
+          await new Promise(r => setTimeout(r, 400 * attempt));
+          continue;
+        }
+        return res;
+      } catch (e) {
+        if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+        lastErr = e;
+        if (e.partial && attempt === SECTION_ATTEMPTS) return e.partial;
+        if (onProgress) onProgress(label + ' — retrying (' + attempt + ' of ' + SECTION_ATTEMPTS + ')…');
+        await new Promise(r => setTimeout(r, 600 * attempt));
+      }
+    }
+    throw lastErr || new Error('section failed');
+  };
+
   if (total <= SINGLE_PASS_LIMIT) {
     try {
-      return await runChunk(plans);
+      return await runChunkWithRetries(plans, 'Reading');
     } catch (err) {
-      if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY' || total <= 2) {
-        if (err.partial) return err.partial;
-        throw err;
-      }
+      if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY') throw err;
+      if (err.partial) return err.partial;
+      if (total <= 2) throw err;
       if (onProgress) onProgress('First pass failed — rereading in sections…');
     }
   }
 
-  const chunks = [];
-  for (let i = 0; i < total; i += PANELS_PER_CHUNK) chunks.push(plans.slice(i, i + PANELS_PER_CHUNK));
+  const chunkOf = (list) => {
+    const out = [];
+    for (let i = 0; i < list.length; i += PANELS_PER_CHUNK) out.push(list.slice(i, i + PANELS_PER_CHUNK));
+    return out;
+  };
 
-  // Two at a time: roughly halves the wait without doubling peak memory.
-  const CONCURRENCY = 2;
-  const slots = new Array(chunks.length).fill(null);
-  const failures = [];
-  let lastError = null;
-  let done = 0;
-  let next = 0;
+  const results = [];
+  const failed = new Set();
 
-  async function worker() {
-    while (next < chunks.length) {
-      const i = next++;
-      try {
-        slots[i] = await runChunk(chunks[i]);
-      } catch (e) {
-        if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
-        lastError = e;
-        if (e.partial) slots[i] = e.partial;
-        else failures.push(i + 1);
+  async function readSet(list, roundLabel) {
+    const chunks = chunkOf(list);
+    const slots = new Array(chunks.length).fill(null);
+    let next = 0, done = 0;
+    const CONCURRENCY = 2;
+    async function worker() {
+      while (next < chunks.length) {
+        const i = next++;
+        const label = roundLabel + ' ' + (i + 1) + ' of ' + chunks.length;
+        try {
+          slots[i] = await runChunkWithRetries(chunks[i], label);
+        } catch (e) {
+          if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+          chunks[i].forEach(p => failed.add(p.index));
+        }
+        done += 1;
+        if (onProgress) onProgress(roundLabel + ': ' + done + ' of ' + chunks.length + ' done…');
+        await new Promise(r => setTimeout(r, 40));
       }
-      done += 1;
-      if (onProgress) onProgress('Read ' + done + ' of ' + chunks.length + ' sections…');
-      await new Promise(r => setTimeout(r, 40));
     }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, worker));
+    slots.filter(Boolean).forEach(r => results.push(r));
   }
 
-  if (onProgress) onProgress('Reading ' + chunks.length + ' sections…');
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, worker));
-  const results = slots.filter(Boolean);
-  failures.sort((a, b) => a - b);
+  if (onProgress) onProgress('Reading ' + Math.ceil(total / PANELS_PER_CHUNK) + ' sections…');
+  await readSet(plans, 'Reading');
+
+  // Check every panel was accounted for, and go back for any that were not.
+  for (let round = 0; round < COVERAGE_ROUNDS; round++) {
+    const seen = new Set();
+    results.forEach(r => (r && Array.isArray(r.panelsRead) ? r.panelsRead : []).forEach(n => seen.add(Number(n))));
+    const missing = plans.filter(p => !seen.has(p.index) && !failed.has(p.index));
+    if (!missing.length) break;
+    if (onProgress) onProgress(missing.length + ' panel(s) unaccounted for — reading those again…');
+    failed.clear();
+    await readSet(missing, 'Second look');
+  }
 
   if (!results.length) {
-    const err = wrapApiError('None of the ' + chunks.length + ' sections could be read'
-      + (lastError ? ': ' + lastError.message : '.'));
+    const err = wrapApiError('None of the sections could be read.');
     err.code = 'ALL_SECTIONS_FAILED';
     throw err;
   }
+
   const merged = merge ? merge(results) : results[0];
-  if (failures.length) merged.failedSections = failures;
+  const seen = new Set((merged.panelsRead || []).map(Number));
+  const stillMissing = plans.filter(p => !seen.has(p.index)).map(p => p.index);
+  merged.coverage = { total, read: total - stillMissing.length, missing: stillMissing };
+  if (stillMissing.length) merged.failedSections = stillMissing;
   return merged;
 }
 
@@ -2045,7 +2174,7 @@ function mergeProfileResults(results) {
 function mergeChatResults(results) {
   const out = {
     sessions: [], phoneNumbers: [], relativeDayMarkers: [], dateEvents: [],
-    summary: '', threadStart: false, attributionConfidence: 'high',
+    summary: '', threadStart: false, attributionConfidence: 'high', panelsRead: [], dateEvidence: [],
   };
   const byDate = {};
   results.forEach((r, chunkIndex) => {
@@ -2068,6 +2197,8 @@ function mergeChatResults(results) {
     });
     if (Array.isArray(r.phoneNumbers)) out.phoneNumbers = out.phoneNumbers.concat(r.phoneNumbers);
     if (Array.isArray(r.relativeDayMarkers)) out.relativeDayMarkers = out.relativeDayMarkers.concat(r.relativeDayMarkers);
+    if (Array.isArray(r.panelsRead)) out.panelsRead = (out.panelsRead || []).concat(r.panelsRead.map(Number).filter(n => n > 0));
+    if (Array.isArray(r.dateEvidence)) out.dateEvidence = (out.dateEvidence || []).concat(r.dateEvidence.filter(Boolean));
     if (Array.isArray(r.dateEvents)) out.dateEvents = out.dateEvents.concat(r.dateEvents);
     // Sections often describe the same overall arc; don't repeat it.
     if (r.summary && !normaliseMsg(out.summary).includes(normaliseMsg(r.summary).slice(0, 40))) {
@@ -2768,17 +2899,126 @@ function LockPanel({ onChanged }) {
   );
 }
 
+// ---------- Calendar ----------
+// No Google account linkage is needed for this: a template link opens a
+// pre-filled event, and the .ics carries a stable UID so re-importing updates
+// the same event rather than creating a second one.
+
+function dateEventTimes(entry) {
+  // Dates are stored by day; a time may be sitting in the notes ("Time: 2:30").
+  const m = (entry.notes || '').match(/(\d{1,2})[:.](\d{2})\s*(am|pm)?/i);
+  let hour = 19, minute = 0;                       // sensible default: evening
+  if (m) {
+    hour = parseInt(m[1], 10);
+    minute = parseInt(m[2], 10);
+    const ampm = (m[3] || '').toLowerCase();
+    if (ampm === 'pm' && hour < 12) hour += 12;
+    if (ampm === 'am' && hour === 12) hour = 0;
+    if (!ampm && hour < 8) hour += 12;              // "2:30" on a date means half two in the afternoon
+  }
+  const start = new Date(entry.date + 'T00:00:00');
+  start.setHours(hour, minute, 0, 0);
+  const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+  return { start, end };
+}
+
+function stampUTC(d) {
+  return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+}
+
+function calendarTitle(person, entry) {
+  const n = (person.dates || []).filter(d => d.status === 'Completed' || d.status === 'Upcoming')
+    .sort((a, b) => (a.date || '').localeCompare(b.date || ''))
+    .findIndex(d => d.id === entry.id);
+  const which = n >= 0 ? ordinal(n + 1) + ' date' : 'Date';
+  return which + ' — ' + person.name;
+}
+
+function googleCalendarUrl(person, entry) {
+  const { start, end } = dateEventTimes(entry);
+  const details = [
+    entry.activity || '',
+    entry.notes ? entry.notes.replace(/From chat import/, '').trim() : '',
+    'Logged in Relationship Tracker.',
+  ].filter(Boolean).join('\n');
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: calendarTitle(person, entry),
+    dates: stampUTC(start) + '/' + stampUTC(end),
+    details,
+    location: entry.location || '',
+  });
+  return 'https://calendar.google.com/calendar/render?' + params.toString();
+}
+
+function icsForDate(person, entry, sequence) {
+  const { start, end } = dateEventTimes(entry);
+  const esc = t => String(t || '').replace(/([,;\\])/g, '\\$1').replace(/\n/g, '\\n');
+  const uid = 'rt-' + entry.id + '@relationship-tracker';
+  return [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Relationship Tracker//EN', 'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH', 'BEGIN:VEVENT',
+    'UID:' + uid,
+    'SEQUENCE:' + (sequence || 0),
+    'DTSTAMP:' + stampUTC(new Date()),
+    'DTSTART:' + stampUTC(start),
+    'DTEND:' + stampUTC(end),
+    'SUMMARY:' + esc(calendarTitle(person, entry)),
+    'LOCATION:' + esc(entry.location || ''),
+    'DESCRIPTION:' + esc((entry.notes || '') + (entry.notes ? '\n' : '') + 'Logged in Relationship Tracker.'),
+    'STATUS:' + (entry.status === 'Cancelled' ? 'CANCELLED' : 'CONFIRMED'),
+    'END:VEVENT', 'END:VCALENDAR',
+  ].join('\r\n');
+}
+
+function downloadIcs(person, entry, sequence) {
+  const data = 'data:text/calendar;charset=utf-8,' + encodeURIComponent(icsForDate(person, entry, sequence));
+  downloadDataUrl(data, (person.name + '-' + entry.date).replace(/\s+/g, '-').toLowerCase() + '.ics');
+}
+
 // ---------- Version ----------
 // Semantic versioning: MAJOR.MINOR.PATCH. MAJOR for breaking changes to the data
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.5.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '1.5.0', date: '2026-08-04', changes: [
+      ['added', 'Import reports the date range a chat covers, before and after saving'],
+      ['added', 'The reader hunts for date evidence — dividers, timestamps, match banners, the phone status bar — and reports what it found'],
+      ['fixed', 'Historical chats were dragged to the present: relative dividers now resolve against the dates in the same image'],
+      ['changed', 'A weekday divider reads forward from the date above it, so "Monday" between 14 and 20 July 2024 is the 15th'],
+      ['changed', 'Undated sessions sit with their neighbours rather than defaulting to today'],
+    ],
+  },
+  {
+    version: '1.4.0', date: '2026-08-03', changes: [
+      ['fixed', 'Screenshot reading was inconsistent: failed sections were abandoned rather than retried'],
+      ['added', 'Every section gets three attempts, including when it comes back empty'],
+      ['added', 'Panel coverage is verified — the model must account for every panel, and anything unread is read again'],
+      ['added', 'Import reports how much of the image was read, and names any panel it could not read'],
+      ['changed', 'Extraction runs at temperature 0, so the same screenshot reads the same way twice'],
+    ],
+  },
+  {
+    version: '1.3.0', date: '2026-08-03', changes: [
+      ['added', 'Confirmation before anything is deleted — a person, a date, a photo, a line, or the whole conversation'],
+      ['added', 'Delete warnings say what goes with it: date count, days of messages, photos'],
+      ['changed', 'Rolling back a version or replacing on import now needs a second, explicit confirmation'],
+    ],
+  },
+  {
+    version: '1.2.0', date: '2026-08-03', changes: [
+      ['added', 'Dates can be sent to Google Calendar, or downloaded as .ics — re-adding updates the same event'],
+      ['changed', 'Chat reading ignores photos, stickers and link previews unless they carry a fact worth keeping'],
+      ['fixed', 'Spaces and line breaks were being stripped as you typed in "Things you have clocked", interests and socials'],
+    ],
+  },
   {
     version: '1.1.1', date: '2026-08-03', changes: [
       ['fixed', 'Top of tall dialogs was unreachable on desktop — Settings, the API key field and other forms now scroll fully'],
@@ -2926,6 +3166,31 @@ function versionIsNewer(a, b) {
   return false;
 }
 
+// One dialog for anything destructive. Deleting is instant and there is no undo,
+// so nothing that removes data should happen on a single tap.
+
+function ConfirmModal({ title, body, detail, confirmLabel, onConfirm, onCancel, danger = true }) {
+  return (
+    <div className="fixed inset-0 bg-black/60 z-[80] flex items-center justify-center p-4">
+      <div className="bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto">
+        <h3 className="font-serif text-lg mb-1">{title}</h3>
+        <p className="text-sm text-stone-700">{body}</p>
+        {detail && <p className="text-xs text-stone-500 mt-1.5">{detail}</p>}
+        <button onClick={onConfirm}
+          className={`mt-4 w-full rounded-md py-2 text-sm font-medium text-white ${
+            danger ? 'bg-red-700 hover:bg-red-800' : 'bg-stone-900 hover:bg-stone-800'
+          }`}>
+          {confirmLabel}
+        </button>
+        <button onClick={onCancel}
+          className="mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
+          Keep it
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ChangelogModal({ onClose, sinceVersion }) {
   const unseen = sinceVersion ? CHANGELOG.filter(e => versionIsNewer(e.version, sinceVersion)) : [];
   const showing = unseen.length ? unseen : CHANGELOG;
@@ -3045,6 +3310,7 @@ function RelationshipTracker() {
   const hiddenAt = React.useRef(null);
   const [lockVersion, setLockVersion] = useState(0);
   const [showChangelog, setShowChangelog] = useState(null);   // 'all' | a version string
+  const [confirmAction, setConfirmAction] = useState(null);   // { title, body, detail, confirmLabel, run }
   const [syncState, setSyncState] = useState({ status: Sync.configured() ? 'idle' : 'off', last: Sync.lastPull(), error: '' });
   const [syncConflict, setSyncConflict] = useState(null);
   const pushTimer = React.useRef(null);
@@ -3337,6 +3603,22 @@ function RelationshipTracker() {
     setNotice('Marked as ended in ' + endYm + '. Edit the details if that is not right.');
   }
 
+  function askConfirm(opts) { setConfirmAction(opts); }
+
+  async function addDateToCalendar(entry, how) {
+    if (!selected) return;
+    const seq = (entry.calendarSeq || 0) + 1;
+    if (how === 'google') {
+      window.open(googleCalendarUrl(selected, entry), '_blank', 'noopener');
+    } else {
+      downloadIcs(selected, entry, seq);
+    }
+    // Bump the sequence so a re-export supersedes the earlier version.
+    await persist(peopleRef.current.map(p => p.id === selected.id
+      ? { ...p, dates: (p.dates || []).map(d => d.id === entry.id ? { ...d, calendarSeq: seq } : d) }
+      : p));
+  }
+
   async function saveContactNote(entry) {
     if (!selected) return;
     const log = [...(selected.contactLog || [])];
@@ -3504,9 +3786,11 @@ function RelationshipTracker() {
           ? 'No conversation could be read from that image. If the text is very small, try splitting the screenshot into two or three shorter ones.'
           : 'The image was read but nothing worth logging came out of it — it may be all small talk.';
       setError(why
+        + (payload.coverage && payload.coverage.total
+          ? ' (' + payload.coverage.read + ' of ' + payload.coverage.total + ' panels read.)' : '')
         + (payload.imageWarnings && payload.imageWarnings.length ? ' ' + payload.imageWarnings.join(' ') : '')
-        + (payload.failedSections && payload.failedSections.length
-          ? ' Sections ' + payload.failedSections.join(', ') + ' failed to read.' : ''));
+        + (payload.coverage && payload.coverage.missing && payload.coverage.missing.length
+          ? ' Panels ' + payload.coverage.missing.join(', ') + ' failed after three attempts each.' : ''));
       return { added: 0, dropped };
     }
 
@@ -3538,13 +3822,19 @@ function RelationshipTracker() {
     setError('');
     const matchNote = (!target.dateMet && !payload.matchedDate && inferredMatch)
       ? ' Match date set to ' + inferredMatch + ' from the first message — edit if wrong.' : '';
-    setNotice(addedPoints + ' line' + (addedPoints === 1 ? '' : 's') + ' and ' + addedFacts + ' fact'
+    const range = sessionDateRange(incoming);
+    setNotice((range ? 'Chat covers ' + formatDateRange(range) + '. ' : '')
+      + addedPoints + ' line' + (addedPoints === 1 ? '' : 's') + ' and ' + addedFacts + ' fact'
       + (addedFacts === 1 ? '' : 's') + ' added to ' + target.name
       + (dropped ? ', ' + dropped + ' duplicate' + (dropped === 1 ? '' : 's') + ' skipped' : '') + '.'
       + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : '')
+      + (payload.coverage && payload.coverage.total
+        ? ' Read ' + payload.coverage.read + ' of ' + payload.coverage.total + ' panels.'
+        : '')
       + (payload.imageWarnings && payload.imageWarnings.length ? ' ' + payload.imageWarnings[0] : '')
-      + (payload.failedSections && payload.failedSections.length
-        ? ' Note: ' + payload.failedSections.length + ' section(s) of the image could not be read, so some of the conversation may be missing.' : '')
+      + (payload.coverage && payload.coverage.missing && payload.coverage.missing.length
+        ? ' Panels ' + payload.coverage.missing.join(', ') + ' could not be read after retrying — reimport that part of the chat.'
+        : '')
       + matchNote);
     return { added: addedPoints, dropped };
   }
@@ -3777,7 +4067,22 @@ function RelationshipTracker() {
                 <button onClick={() => startEditPerson(selected)} className="p-1.5 text-stone-500 hover:text-stone-900 rounded focus:outline-none focus:ring-2 focus:ring-stone-900">
                   <Pencil className="w-4 h-4" />
                 </button>
-                <button onClick={() => removePerson(selected.id)} className="p-1.5 text-stone-500 hover:text-red-700 rounded focus:outline-none focus:ring-2 focus:ring-stone-900">
+                <button onClick={() => askConfirm({
+                  title: 'Delete ' + selected.name + '?',
+                  body: 'Everything held on her goes: profile, photos, the whole timeline, dates, your notes and your read.',
+                  detail: (() => {
+                    const bits = [];
+                    const dts = (selected.dates || []).length;
+                    const days = (selected.conversationDays || []).length;
+                    const phs = (selected.photos || []).length;
+                    if (dts) bits.push(dts + ' date' + (dts === 1 ? '' : 's'));
+                    if (days) bits.push(days + ' day' + (days === 1 ? '' : 's') + ' of messages');
+                    if (phs) bits.push(phs + ' photo' + (phs === 1 ? '' : 's'));
+                    return bits.length ? 'This removes ' + bits.join(', ') + '. There is no undo, though a backup or the sync history can bring her back.' : 'There is no undo.';
+                  })(),
+                  confirmLabel: 'Delete her record',
+                  run: () => removePerson(selected.id),
+                })} className="p-1.5 text-stone-500 hover:text-red-700 rounded focus:outline-none focus:ring-2 focus:ring-stone-900">
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>
@@ -3792,6 +4097,8 @@ function RelationshipTracker() {
                 {next ? (
                   <span className="text-emerald-800 font-medium">
                     Next date {formatDayLabel(next.date)} — {next.location || 'venue TBC'}
+                    <button onClick={() => addDateToCalendar(next, 'google')}
+                      className="ml-2 text-xs underline text-stone-600 hover:text-stone-900">Add to calendar</button>
                   </span>
                 ) : quiet === null ? (
                   <span className="text-stone-500">No activity logged yet.</span>
@@ -3845,7 +4152,12 @@ function RelationshipTracker() {
             onView={setLightbox}
             profilePhotoId={selected.profilePhotoId}
             onAddFiles={addPhotosToSelected}
-            onDelete={deletePhoto}
+            onDelete={(id) => askConfirm({
+              title: 'Delete this photo?',
+              body: 'It is removed from her record on every device once this syncs.',
+              confirmLabel: 'Delete photo',
+              run: () => deletePhoto(id),
+            })}
             onSetProfile={setProfilePhoto}
           />
 
@@ -3872,8 +4184,20 @@ function RelationshipTracker() {
             summary={selected.chatSummary || ''}
             chronology={buildChronology(selected)}
             onAddFiles={addConversationFromFiles}
-            onDelete={deleteConversationEntry}
-            onClear={clearConversation}
+            onDelete={(id) => askConfirm({
+              title: 'Delete this line?',
+              body: 'One line of the conversation record is removed.',
+              detail: 'The day summary and facts stay as they are.',
+              confirmLabel: 'Delete line',
+              run: () => deleteConversationEntry(id),
+            })}
+            onClear={() => askConfirm({
+              title: 'Clear the whole conversation?',
+              body: 'Every summarised day, fact and line for ' + selected.name + ' is removed so you can reimport the screenshots fresh.',
+              detail: 'Dates, photos, contact notes and your own write-ups are untouched.',
+              confirmLabel: 'Clear conversation',
+              run: clearConversation,
+            })}
             onEditDate={startEditDate}
             onAddContact={() => setContactNote({})}
             onEditContact={(c) => setContactNote(c)}
@@ -3946,7 +4270,13 @@ function RelationshipTracker() {
                       <button onClick={() => startEditDate(d)} className="p-1.5 text-stone-500 hover:text-stone-900 rounded focus:outline-none focus:ring-2 focus:ring-stone-900">
                         <Pencil className="w-4 h-4" />
                       </button>
-                      <button onClick={() => removeDate(d.id)} className="p-1.5 text-stone-500 hover:text-red-700 rounded focus:outline-none focus:ring-2 focus:ring-stone-900">
+                      <button onClick={() => askConfirm({
+                        title: 'Delete this date?',
+                        body: (d.date ? formatDayLabel(d.date) : 'This date') + (d.location ? ' at ' + d.location : '') + ' will be removed.',
+                        detail: (d.notes || '').trim() ? 'Your write-up of it goes too, and nothing else records what happened.' : 'There is no undo.',
+                        confirmLabel: 'Delete date',
+                        run: () => removeDate(d.id),
+                      })} className="p-1.5 text-stone-500 hover:text-red-700 rounded focus:outline-none focus:ring-2 focus:ring-stone-900">
                         <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
@@ -3991,6 +4321,16 @@ function RelationshipTracker() {
           onCancel={() => setSyncConflict(null)}
         />
       )}
+      {confirmAction && (
+        <ConfirmModal
+          title={confirmAction.title}
+          body={confirmAction.body}
+          detail={confirmAction.detail}
+          confirmLabel={confirmAction.confirmLabel}
+          onCancel={() => setConfirmAction(null)}
+          onConfirm={async () => { const run = confirmAction.run; setConfirmAction(null); await run(); }}
+        />
+      )}
       {showChangelog && (
         <ChangelogModal
           sinceVersion={showChangelog === 'all' ? null : showChangelog}
@@ -4017,6 +4357,9 @@ function RelationshipTracker() {
           <DateFormModal
             form={dateForm} setForm={setDateForm} isNew={dateEditId === 'new'}
             onCancel={cancelDateForm} onSave={saveDateForm}
+            onAddToCalendar={dateEditId && dateEditId !== 'new'
+              ? (how) => addDateToCalendar({ ...dateForm, id: dateEditId }, how)
+              : null}
           />
         )}
         {showPersonForm && (
@@ -4041,6 +4384,16 @@ function RelationshipTracker() {
             onShowChangelog={() => setShowChangelog('all')}
             onShowChangelog={() => setShowChangelog('all')}
             lockVersion={lockVersion}
+          />
+        )}
+        {confirmAction && (
+          <ConfirmModal
+            title={confirmAction.title}
+            body={confirmAction.body}
+            detail={confirmAction.detail}
+            confirmLabel={confirmAction.confirmLabel}
+            onCancel={() => setConfirmAction(null)}
+            onConfirm={async () => { const run = confirmAction.run; setConfirmAction(null); await run(); }}
           />
         )}
         {showChangelog && (
@@ -4537,7 +4890,7 @@ function PersonFormModal({ form, setForm, isNew, onCancel, onSave, knownChannels
 
 // ---------- Date form ----------
 
-function DateFormModal({ form, setForm, isNew, onCancel, onSave }) {
+function DateFormModal({ form, setForm, isNew, onCancel, onSave, onAddToCalendar }) {
   const avg = overallAvg(form);
   return (
     <ModalShell title={isNew ? 'Add date' : 'Edit date'} onCancel={onCancel} onSave={onSave}>
@@ -4590,6 +4943,24 @@ function DateFormModal({ form, setForm, isNew, onCancel, onSave }) {
           onFocus={focusScroll} style={fieldScrollMargin} placeholder="e.g. Second date booked, No spark, TBD"
           className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
       </Field>
+      {form.date && form.status !== 'Proposed' && onAddToCalendar && (
+        <div className="border border-stone-200 rounded-md p-2.5 bg-stone-50">
+          <div className="text-xs text-stone-600 mb-2">
+            Put this in your calendar. Re-adding after a change updates the same event rather than making a second one.
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => onAddToCalendar('google')}
+              className="flex-1 flex items-center justify-center gap-1.5 border border-stone-300 bg-white rounded-md py-1.5 text-sm font-medium hover:bg-stone-100">
+              <Calendar className="w-3.5 h-3.5" /> Google Calendar
+            </button>
+            <button type="button" onClick={() => onAddToCalendar('ics')}
+              className="flex-1 flex items-center justify-center gap-1.5 border border-stone-300 bg-white rounded-md py-1.5 text-sm font-medium hover:bg-stone-100">
+              <Download className="w-3.5 h-3.5" /> .ics file
+            </button>
+          </div>
+        </div>
+      )}
+
       <Field
         label={form.status === 'Upcoming' ? 'Notes' : 'How it went — your record'}
         hint={form.status === 'Upcoming' ? null : 'Nothing about the date itself is captured anywhere else. What she said, how she was, what you made of it.'}
@@ -4658,6 +5029,11 @@ function ChatDateConfirmModal({ info, onCancel, onConfirm }) {
           That chat shows <strong>{markerText}</strong>, so the calendar date isn't certain.
           {` ${payload.sessions.length} session${payload.sessions.length === 1 ? '' : 's'} need a date.`}
         </p>
+        {payload.dateRange && (
+          <p className="text-sm text-stone-700 mt-1">
+            The dated parts of this chat run {formatDateRange(payload.dateRange)}.
+          </p>
+        )}
         <p className="text-xs text-stone-500 mt-1">The lines will be slotted into the conversation in date order.</p>
         <input type="date" value={date} onChange={e => setDate(e.target.value)}
           className="mt-3 w-full border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900" />
@@ -4821,10 +5197,14 @@ function MyReadCard({ myRead: raw, coachRead, onEdit }) {
 function MyReadModal({ myRead, onCancel, onSave }) {
   const [d, setD] = useState(() => ({ ...emptyMyRead(), ...(myRead || {}) }));
   const set = (k, v) => setD(x => ({ ...x, [k]: v }));
+  // Splitting on every keystroke ate spaces and newlines, so the raw text is
+  // held as typed and only split when saving.
+  const [flagsText, setFlagsText] = useState(() => ((myRead && myRead.flags) || []).join('\n'));
+  const commit = () => onSave({ ...d, flags: flagsText.split('\n').map(t => t.trim()).filter(Boolean) });
   const inputCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
 
   return (
-    <ModalShell title="Where you stand" onCancel={onCancel} onSave={() => onSave(d)}>
+    <ModalShell title="Where you stand" onCancel={onCancel} onSave={commit}>
       <Field label="What do you want here?" hint="Be honest — the advice changes completely">
         <div className="space-y-1.5">
           {INTENTIONS.map(i => (
@@ -4878,8 +5258,8 @@ function MyReadModal({ myRead, onCancel, onSave }) {
           onFocus={focusScroll} style={fieldScrollMargin} className={inputCls} />
       </Field>
       <Field label="Things you have clocked" hint="One per line — anything that gave you pause">
-        <textarea value={(d.flags || []).join('\n')} rows={3} onFocus={focusScroll} style={fieldScrollMargin}
-          onChange={e => set('flags', e.target.value.split('\n').map(t => t.trim()).filter(Boolean))}
+        <textarea value={flagsText} rows={3} onFocus={focusScroll} style={fieldScrollMargin}
+          onChange={e => setFlagsText(e.target.value)}
           placeholder={'Still talks about her ex\nCancelled twice'}
           className={inputCls} />
       </Field>
@@ -5022,6 +5402,14 @@ function ProfileCard({ profile: raw, onEdit }) {
 function ProfileEditModal({ profile, onCancel, onSave }) {
   const [draft, setDraft] = useState(() => ({ ...emptyProfile(), ...profile }));
   const set = (k, v) => setDraft(d => ({ ...d, [k]: v }));
+  const [interestsText, setInterestsText] = useState(() => ((profile && profile.interests) || []).join(', '));
+  const [socialsText, setSocialsText] = useState(() => ((profile && profile.socials) || []).join(', '));
+  const splitList = t => t.split(',').map(x => x.trim()).filter(Boolean);
+  const commitProfile = () => onSave({
+    ...draft,
+    interests: splitList(interestsText),
+    socials: splitList(socialsText),
+  });
   const inputCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
 
   function setPrompt(i, key, v) {
@@ -5029,7 +5417,7 @@ function ProfileEditModal({ profile, onCancel, onSave }) {
   }
 
   return (
-    <ModalShell title="Profile details" onCancel={onCancel} onSave={() => onSave(draft)}>
+    <ModalShell title="Profile details" onCancel={onCancel} onSave={commitProfile}>
       {PROFILE_GROUPS.map(group => (
         <div key={group}>
           <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-1 mt-1">{group}</div>
@@ -5043,8 +5431,8 @@ function ProfileEditModal({ profile, onCancel, onSave }) {
         </div>
       ))}
       <Field label="Interests" hint="Comma separated">
-        <input value={(draft.interests || []).join(', ')} onFocus={focusScroll} style={fieldScrollMargin}
-          onChange={e => set('interests', e.target.value.split(',').map(t => t.trim()).filter(Boolean))} className={inputCls} />
+        <input value={interestsText} onFocus={focusScroll} style={fieldScrollMargin}
+          onChange={e => setInterestsText(e.target.value)} className={inputCls} />
       </Field>
       <div>
         <div className="flex items-center justify-between mb-1">
@@ -5071,8 +5459,8 @@ function ProfileEditModal({ profile, onCancel, onSave }) {
         <textarea value={draft.bio || ''} onChange={e => set('bio', e.target.value)} rows={3} onFocus={focusScroll} style={fieldScrollMargin} className={inputCls} />
       </Field>
       <Field label="Socials" hint="Comma separated">
-        <input value={(draft.socials || []).join(', ')} onFocus={focusScroll} style={fieldScrollMargin}
-          onChange={e => set('socials', e.target.value.split(',').map(t => t.trim()).filter(Boolean))} className={inputCls} />
+        <input value={socialsText} onFocus={focusScroll} style={fieldScrollMargin}
+          onChange={e => setSocialsText(e.target.value)} className={inputCls} />
       </Field>
     </ModalShell>
   );
@@ -5238,7 +5626,6 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClea
   const items = chronology || [];
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [confirmClear, setConfirmClear] = useState(false);
   const [openDetail, setOpenDetail] = useState({});
   const inputRef = React.useRef(null);
 
@@ -5280,18 +5667,10 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClea
 
       {hasChat && (
         <div className="flex items-center gap-2 mb-3">
-          {confirmClear ? (
-            <>
-              <button onClick={() => { setConfirmClear(false); onClear(); }}
-                className="text-xs text-white bg-red-700 rounded px-2 py-1">Delete all chat</button>
-              <button onClick={() => setConfirmClear(false)} className="text-xs text-stone-500 px-1">Cancel</button>
-            </>
-          ) : (
-            <button onClick={() => setConfirmClear(true)}
-              className="text-xs text-stone-600 border border-stone-300 rounded px-2 py-1 hover:bg-stone-100">
-              Clear chat &amp; reimport
-            </button>
-          )}
+          <button onClick={onClear}
+            className="text-xs text-stone-600 border border-stone-300 rounded px-2 py-1 hover:bg-stone-100">
+            Clear chat &amp; reimport
+          </button>
         </div>
       )}
 
@@ -5881,6 +6260,33 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose }) {
                   {payload.totalPoints} line{payload.totalPoints === 1 ? '' : 's'} across {payload.sessions.length} day{payload.sessions.length === 1 ? '' : 's'}
                   {payload.matchedDate ? ' · matched ' + payload.matchedDate : ''}
                 </div>
+                {payload.dateRange && (
+                  <div className="text-xs text-stone-700 mt-1">
+                    Covers {formatDateRange(payload.dateRange)}
+                  </div>
+                )}
+                {!payload.dateRange && (
+                  <div className="text-xs text-amber-700 mt-1">
+                    No date could be found in this image — set one below or it will be filed under today.
+                  </div>
+                )}
+                {payload.dateEvidence && payload.dateEvidence.length > 0 && (
+                  <details className="mt-1">
+                    <summary className="text-[11px] text-stone-400 cursor-pointer">How the dates were worked out</summary>
+                    <ul className="mt-1 space-y-0.5">
+                      {payload.dateEvidence.slice(0, 8).map((e, i) => (
+                        <li key={i} className="text-[11px] text-stone-500">{e}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+                {payload.coverage && payload.coverage.total > 0 && (
+                  <div className={`text-xs mt-0.5 ${payload.coverage.missing.length ? 'text-amber-700' : 'text-emerald-700'}`}>
+                    {payload.coverage.missing.length
+                      ? 'Read ' + payload.coverage.read + ' of ' + payload.coverage.total + ' panels — panels ' + payload.coverage.missing.join(', ') + ' could not be read'
+                      : 'Whole image read — ' + payload.coverage.total + ' of ' + payload.coverage.total + ' panels'}
+                  </div>
+                )}
                 {payload.summary && <p className="text-sm text-stone-700 mt-1.5">{payload.summary}</p>}
                 {payload.lowConfidence && (
                   <p className="text-xs text-amber-700 mt-1.5">Who-said-what was unclear here — check it after saving and use Swap if it's reversed.</p>
@@ -6019,6 +6425,7 @@ function RestorePanel({ onMerge, onReplace }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [preview, setPreview] = useState(null);
+  const [confirmRollback, setConfirmRollback] = useState(false);
 
   async function load() {
     setBusy(true); setErr(''); setPreview(null);
@@ -6033,6 +6440,7 @@ function RestorePanel({ onMerge, onReplace }) {
     try {
       const rev = await ghRevision(v.version);
       setPreview({ ...rev, version: v.version, at: v.at });
+      setConfirmRollback(false);
     } catch (e) { setErr(String(e.message || e)); }
     setBusy(false);
   }
@@ -6082,10 +6490,17 @@ function RestorePanel({ onMerge, onReplace }) {
             className="mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800">
             Merge this version in
           </button>
-          <button onClick={() => onReplace(preview.people)}
-            className="mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
-            Roll everything back to this
+          <button onClick={() => { if (confirmRollback) onReplace(preview.people); else setConfirmRollback(true); }}
+            className={`mt-2 w-full rounded-md py-2 text-sm font-medium ${
+              confirmRollback ? 'bg-red-700 text-white hover:bg-red-800' : 'border border-stone-300 hover:bg-stone-100'
+            }`}>
+            {confirmRollback ? 'Yes — discard what is here and use this version' : 'Roll everything back to this'}
           </button>
+          {confirmRollback && (
+            <p className="text-[11px] text-red-700 mt-1">
+              Anything added since this version will be lost. Merging is the safe option.
+            </p>
+          )}
           <button onClick={() => setPreview(null)} className="w-full text-sm text-stone-500 py-2">Back to the list</button>
         </div>
       )}
@@ -6295,6 +6710,7 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
   const [saved, setSaved] = useState(false);
   const [importErr, setImportErr] = useState('');
   const [pending, setPending] = useState(null);
+  const [confirmReplace, setConfirmReplace] = useState(false);
   const importInputRef = React.useRef(null);
 
   function saveKey() {
@@ -6331,6 +6747,7 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
         const incoming = people2.map(backfillPerson);
         const preview = mergePeopleLists(people, incoming);
         setPending({ incoming, preview, exportedAt: parsed.exportedAt || '' });
+        setConfirmReplace(false);
       } catch (err) {
         setImportErr('Could not read that file — expecting a backup exported from this app.');
       }
@@ -6428,9 +6845,13 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
                   className="mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800">
                   Merge — keep both
                 </button>
-                <button onClick={doReplace}
-                  className="mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
-                  Replace everything on this device
+                <button onClick={() => { if (confirmReplace) doReplace(); else setConfirmReplace(true); }}
+                  className={`mt-2 w-full rounded-md py-2 text-sm font-medium ${
+                    confirmReplace ? 'bg-red-700 text-white hover:bg-red-800' : 'border border-stone-300 hover:bg-stone-100'
+                  }`}>
+                  {confirmReplace
+                    ? 'Yes — delete the ' + people.length + ' on this device and use the file'
+                    : 'Replace everything on this device'}
                 </button>
                 <button onClick={() => setPending(null)} className="w-full text-sm text-stone-500 py-2">Cancel</button>
                 <p className="text-[11px] text-stone-400 mt-1">
@@ -6746,7 +7167,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-04 18:25';
+const BUILD_STAMP = '2026-08-04 19:12';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -7772,6 +8193,8 @@ WORK OUT WHO IS WHO BEFORE YOU SUMMARISE. This is the part that goes wrong most 
 - "Delivered", "Read" and "Sent" appear under the USER's messages; a small avatar usually sits beside HERS.
 - Sense-check: if a message answers a question, it was written by whoever did not ask it. If your attribution has one person asking and answering their own questions, flip it.
 
+IGNORE PHOTOS AND MEDIA. Do not look into, describe, or interpret any image, photo, video, sticker, GIF, voice note or link preview inside the conversation. Do not spend effort on them. If one clearly carries a fact worth keeping — she sent a picture of her new dog, or a screenshot of a venue you then agreed on — record that fact in one short line and move on. Otherwise skip it entirely and never write a line that only says a photo was sent.
+
 IGNORE THE FURNITURE. A screenshot is full of things neither of you said. None of the following is ever a message, a fact, a session or an event, and none of it belongs in your output: the app's encryption notice ("Messages and calls are end-to-end encrypted"), disappearing-message notices, "You matched", "Say hi", blocked/report banners, delivery and read receipts, typing indicators, "Missed voice call" rows, date dividers themselves, unread-count separators, stickers and reaction badges, and any advertising or safety prompt the app inserts. If a whole session contains nothing but this, leave it out entirely.
 
 READ IT LIKE A PERSON, NOT A PARSER. You are summarising a conversation between two adults for the man's own private record. Judge what actually mattered:
@@ -7785,6 +8208,8 @@ SPLIT THE CHAT INTO SESSIONS. A session is one continuous burst of conversation 
 
 Respond with ONLY a JSON object, no other text, no markdown fences:
 {
+"dateEvidence": array of short strings — every piece of date evidence you found and where, e.g. "divider '14 July 2024' above panel 2", "timestamp 19:42 beside her first message", "matched banner: 3 July". Empty array only if the image genuinely carries none.
+"panelsRead": array of integers — the panel numbers you actually read and accounted for in this reply, e.g. [4,5,6,7]. List every panel you were given. If a panel was blank, unreadable or held nothing but app furniture, still list it — you have accounted for it. This is checked, so do not guess.
 "contactName": string or null (her name from the chat header — not the user's own name),
 "userSide": "left" or "right" or null,
 "attributionConfidence": "high" or "low",
@@ -7804,6 +8229,20 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 "summary": string — two or three sentences addressed to him on where the whole conversation stands: tone, momentum, anything agreed or left open. Second person throughout.
 "phoneNumbers": array of strings.
 }
+FIND THE DATES. Every chat screenshot contains date evidence somewhere — look for it properly before giving up, and search the whole image, not just the top:
+- Day dividers between messages ("Today", "Yesterday", "Monday", "14 July", "14/07/2024").
+- Timestamps beside individual messages, which often carry a date on the first message of a day.
+- The "you matched on" or "you connected on" banner.
+- The phone's own status bar if it is visible in the capture.
+- Dates written inside the messages themselves ("see you on the 14th", "happy new year").
+If you can see only one date in the whole image, that is still enough: anchor everything else to it.
+
+THIS CHAT MAY BE OLD. He is building a historical record and may import a conversation from months or years ago. Do not assume it is recent:
+- If any divider or timestamp carries a year, use that year for the whole screenshot unless another year is shown.
+- Resolve a relative divider ("Yesterday", "Monday") against the nearest ABSOLUTE date in the same image, not against today's date. "Monday" sitting between "14 July 2024" and "20 July 2024" is 15 July 2024.
+- Only fall back to today's date when the image carries no absolute date anywhere.
+Report what you found in "dateEvidence" so it can be checked.
+
 RESOLVING DATES. You are told today's date below. Chat apps write dividers in several styles and you must convert every one of them to YYYY-MM-DD:
 - "Today" → today's date. "Yesterday" → the day before.
 - A weekday alone ("Monday", "Sat") → the most recent such weekday on or before today.
@@ -8113,6 +8552,12 @@ async function extractChatPayload(files, onProgress) {
     threadStart = false;
   let failedSections = [];
   const imageWarnings = [];
+  const coverage = {
+    total: 0,
+    read: 0,
+    missing: []
+  };
+  let dateEvidence = [];
   let n = 0;
   for (const file of files) {
     n += 1;
@@ -8136,6 +8581,12 @@ async function extractChatPayload(files, onProgress) {
     if (fields.attributionConfidence === 'low') lowConfidence = true;
     if (fields.threadStart === true) threadStart = true;
     if (Array.isArray(fields.failedSections)) failedSections = failedSections.concat(fields.failedSections);
+    if (Array.isArray(fields.dateEvidence)) dateEvidence = dateEvidence.concat(fields.dateEvidence);
+    if (fields.coverage) {
+      coverage.total += fields.coverage.total;
+      coverage.read += fields.coverage.read;
+      coverage.missing = coverage.missing.concat(fields.coverage.missing || []);
+    }
   }
   const totalPoints = sessions.reduce((sum, ses) => sum + (ses && ses.points || []).length, 0);
   return {
@@ -8149,6 +8600,9 @@ async function extractChatPayload(files, onProgress) {
     threadStart,
     failedSections,
     imageWarnings,
+    coverage,
+    dateEvidence,
+    dateRange: sessionDateRange(datedSessions(sessions.filter(Boolean), null)),
     markers: Array.from(new Set(markers.filter(Boolean))),
     lowConfidence,
     totalPoints,
@@ -8161,7 +8615,7 @@ async function extractChatPayload(files, onProgress) {
 // readable label, work the date out here rather than asking the user.
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-function parseDayLabel(label, todayIso) {
+function parseDayLabel(label, todayIso, forward) {
   if (!label) return null;
   const t = String(label).trim().toLowerCase();
   const today = todayIso || TODAY();
@@ -8194,8 +8648,13 @@ function parseDayLabel(label, todayIso) {
   }
   const wd = WEEKDAYS.findIndex(d => t.includes(d.slice(0, 3)));
   if (wd > -1) {
-    const todayDow = new Date(today + 'T00:00:00').getDay();
-    const back = (todayDow - wd + 7) % 7;
+    const dow = new Date(today + 'T00:00:00').getDay();
+    if (forward) {
+      // Reading down a chat, a weekday divider comes after the date above it.
+      const ahead = (wd - dow + 7) % 7;
+      return shiftDate(today, ahead === 0 ? 7 : ahead);
+    }
+    const back = (dow - wd + 7) % 7;
     return shiftDate(today, -back);
   }
   return null;
@@ -8203,18 +8662,73 @@ function parseDayLabel(label, todayIso) {
 
 // Undated sessions take the confirmed date; if several sessions share it they
 // stay in the order they appeared.
+// A label carries its own year, so it can be trusted on its own.
+function labelIsAbsolute(label) {
+  const t = String(label || '').toLowerCase();
+  return /\b(19|20)\d{2}\b/.test(t);
+}
 function datedSessions(sessions, fallbackDate) {
-  const resolved = (sessions || []).filter(Boolean).map(ses => ({
-    ...ses,
-    date: ses.date || parseDayLabel(ses.dayLabel, TODAY()) || null
+  const list = (sessions || []).filter(Boolean).map(ses => ({
+    ...ses
   }));
-  const known = resolved.filter(ses => ses.date).map(ses => ses.date);
-  const firstKnown = known.length ? known[0] : null;
-  return resolved.map((ses, i) => ({
+
+  // 1. Trust what the model dated, and any label carrying a year.
+  list.forEach(ses => {
+    if (!ses.date && labelIsAbsolute(ses.dayLabel)) ses.date = parseDayLabel(ses.dayLabel, TODAY());
+  });
+  const anchorFor = i => {
+    for (let j = i - 1; j >= 0; j--) if (list[j].date) return list[j].date;
+    for (let j = i + 1; j < list.length; j++) if (list[j].date) return list[j].date;
+    return null;
+  };
+
+  // 2. Resolve relative labels against the nearest dated session, not today —
+  //    otherwise "Monday" in a chat from 2024 lands in this week.
+  // The most recent absolute date in the image stands in for "today" when the
+  // screenshot itself is old.
+  const absolutes = list.map(x => x.date).filter(Boolean).sort();
+  const latestAbsolute = absolutes.length ? absolutes[absolutes.length - 1] : null;
+  list.forEach((ses, i) => {
+    if (ses.date || !ses.dayLabel) return;
+    let before = null;
+    for (let j = i - 1; j >= 0; j--) if (list[j].date) {
+      before = list[j].date;
+      break;
+    }
+    const relativeToNow = /today|tonight|yesterday/i.test(ses.dayLabel);
+    if (relativeToNow) {
+      const base = latestAbsolute && latestAbsolute < TODAY() ? latestAbsolute : TODAY();
+      ses.date = parseDayLabel(ses.dayLabel, base);
+      return;
+    }
+    // Read forward from the date above it, or back from the one below.
+    ses.date = before ? parseDayLabel(ses.dayLabel, before, true) : parseDayLabel(ses.dayLabel, anchorFor(i) || TODAY());
+  });
+
+  // 3. Sessions with no label at all sit with their neighbours.
+  list.forEach((ses, i) => {
+    if (!ses.date) ses.date = anchorFor(i);
+  });
+
+  // 4. Only now fall back to the date he confirmed, or today.
+  return list.map((ses, i) => ({
     ...ses,
-    date: ses.date || fallbackDate || firstKnown || TODAY(),
+    date: ses.date || fallbackDate || TODAY(),
     order: i
   }));
+}
+function sessionDateRange(sessions) {
+  const dates = (sessions || []).map(s => s.date).filter(Boolean).sort();
+  if (!dates.length) return null;
+  return {
+    first: dates[0],
+    last: dates[dates.length - 1]
+  };
+}
+function formatDateRange(range) {
+  if (!range) return '';
+  if (range.first === range.last) return formatDayLabel(range.first);
+  return formatDayLabel(range.first) + ' to ' + formatDayLabel(range.last);
 }
 
 // Merge new sessions into the person's day timeline: one entry per date, facts
@@ -8407,6 +8921,9 @@ async function callVision(contentBlocks, maxTokens, attempt) {
       body: JSON.stringify({
         model: 'claude-sonnet-5',
         max_tokens: maxTokens || 800,
+        // Nothing here benefits from creative variation, and variation is exactly
+        // what makes two reads of one screenshot disagree.
+        temperature: 0,
         messages: [{
           role: 'user',
           content: contentBlocks
@@ -8520,6 +9037,9 @@ function wrapApiError(message) {
 const PANELS_PER_CHUNK = 4;
 const SINGLE_PASS_LIMIT = 5; // above this, go straight to sections
 
+const SECTION_ATTEMPTS = 3; // a section gets three goes before it is called failed
+const COVERAGE_ROUNDS = 2; // then two rounds of re-reading whatever was missed
+
 async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgress) {
   const total = plans.length;
   const runChunk = async chunk => {
@@ -8545,61 +9065,108 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
     try {
       return await callVision(blocks, maxTokens || 4000);
     } finally {
-      // Drop the encoded pixels as soon as the request is done with them.
       blocks.forEach(b => {
         if (b.type === 'image') b.source.data = null;
       });
     }
   };
+
+  // A section that fails is retried rather than written off. Most failures are
+  // transient: a truncated reply, a dropped connection, a malformed object.
+  const runChunkWithRetries = async (chunk, label) => {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= SECTION_ATTEMPTS; attempt++) {
+      try {
+        const res = await runChunk(chunk);
+        const got = Array.isArray(res && res.sessions) ? res.sessions.length : 1;
+        // An empty reply for panels that plainly hold a conversation is a failure
+        // too — try again before accepting it.
+        if (got === 0 && attempt < SECTION_ATTEMPTS) {
+          lastErr = new Error('nothing read');
+          await new Promise(r => setTimeout(r, 400 * attempt));
+          continue;
+        }
+        return res;
+      } catch (e) {
+        if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+        lastErr = e;
+        if (e.partial && attempt === SECTION_ATTEMPTS) return e.partial;
+        if (onProgress) onProgress(label + ' — retrying (' + attempt + ' of ' + SECTION_ATTEMPTS + ')…');
+        await new Promise(r => setTimeout(r, 600 * attempt));
+      }
+    }
+    throw lastErr || new Error('section failed');
+  };
   if (total <= SINGLE_PASS_LIMIT) {
     try {
-      return await runChunk(plans);
+      return await runChunkWithRetries(plans, 'Reading');
     } catch (err) {
-      if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY' || total <= 2) {
-        if (err.partial) return err.partial;
-        throw err;
-      }
+      if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY') throw err;
+      if (err.partial) return err.partial;
+      if (total <= 2) throw err;
       if (onProgress) onProgress('First pass failed — rereading in sections…');
     }
   }
-  const chunks = [];
-  for (let i = 0; i < total; i += PANELS_PER_CHUNK) chunks.push(plans.slice(i, i + PANELS_PER_CHUNK));
-
-  // Two at a time: roughly halves the wait without doubling peak memory.
-  const CONCURRENCY = 2;
-  const slots = new Array(chunks.length).fill(null);
-  const failures = [];
-  let lastError = null;
-  let done = 0;
-  let next = 0;
-  async function worker() {
-    while (next < chunks.length) {
-      const i = next++;
-      try {
-        slots[i] = await runChunk(chunks[i]);
-      } catch (e) {
-        if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
-        lastError = e;
-        if (e.partial) slots[i] = e.partial;else failures.push(i + 1);
+  const chunkOf = list => {
+    const out = [];
+    for (let i = 0; i < list.length; i += PANELS_PER_CHUNK) out.push(list.slice(i, i + PANELS_PER_CHUNK));
+    return out;
+  };
+  const results = [];
+  const failed = new Set();
+  async function readSet(list, roundLabel) {
+    const chunks = chunkOf(list);
+    const slots = new Array(chunks.length).fill(null);
+    let next = 0,
+      done = 0;
+    const CONCURRENCY = 2;
+    async function worker() {
+      while (next < chunks.length) {
+        const i = next++;
+        const label = roundLabel + ' ' + (i + 1) + ' of ' + chunks.length;
+        try {
+          slots[i] = await runChunkWithRetries(chunks[i], label);
+        } catch (e) {
+          if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+          chunks[i].forEach(p => failed.add(p.index));
+        }
+        done += 1;
+        if (onProgress) onProgress(roundLabel + ': ' + done + ' of ' + chunks.length + ' done…');
+        await new Promise(r => setTimeout(r, 40));
       }
-      done += 1;
-      if (onProgress) onProgress('Read ' + done + ' of ' + chunks.length + ' sections…');
-      await new Promise(r => setTimeout(r, 40));
     }
+    await Promise.all(Array.from({
+      length: Math.min(CONCURRENCY, chunks.length)
+    }, worker));
+    slots.filter(Boolean).forEach(r => results.push(r));
   }
-  if (onProgress) onProgress('Reading ' + chunks.length + ' sections…');
-  await Promise.all(Array.from({
-    length: Math.min(CONCURRENCY, chunks.length)
-  }, worker));
-  const results = slots.filter(Boolean);
-  failures.sort((a, b) => a - b);
+  if (onProgress) onProgress('Reading ' + Math.ceil(total / PANELS_PER_CHUNK) + ' sections…');
+  await readSet(plans, 'Reading');
+
+  // Check every panel was accounted for, and go back for any that were not.
+  for (let round = 0; round < COVERAGE_ROUNDS; round++) {
+    const seen = new Set();
+    results.forEach(r => (r && Array.isArray(r.panelsRead) ? r.panelsRead : []).forEach(n => seen.add(Number(n))));
+    const missing = plans.filter(p => !seen.has(p.index) && !failed.has(p.index));
+    if (!missing.length) break;
+    if (onProgress) onProgress(missing.length + ' panel(s) unaccounted for — reading those again…');
+    failed.clear();
+    await readSet(missing, 'Second look');
+  }
   if (!results.length) {
-    const err = wrapApiError('None of the ' + chunks.length + ' sections could be read' + (lastError ? ': ' + lastError.message : '.'));
+    const err = wrapApiError('None of the sections could be read.');
     err.code = 'ALL_SECTIONS_FAILED';
     throw err;
   }
   const merged = merge ? merge(results) : results[0];
-  if (failures.length) merged.failedSections = failures;
+  const seen = new Set((merged.panelsRead || []).map(Number));
+  const stillMissing = plans.filter(p => !seen.has(p.index)).map(p => p.index);
+  merged.coverage = {
+    total,
+    read: total - stillMissing.length,
+    missing: stillMissing
+  };
+  if (stillMissing.length) merged.failedSections = stillMissing;
   return merged;
 }
 function mergeProfileResults(results) {
@@ -8625,7 +9192,9 @@ function mergeChatResults(results) {
     dateEvents: [],
     summary: '',
     threadStart: false,
-    attributionConfidence: 'high'
+    attributionConfidence: 'high',
+    panelsRead: [],
+    dateEvidence: []
   };
   const byDate = {};
   results.forEach((r, chunkIndex) => {
@@ -8652,6 +9221,8 @@ function mergeChatResults(results) {
     });
     if (Array.isArray(r.phoneNumbers)) out.phoneNumbers = out.phoneNumbers.concat(r.phoneNumbers);
     if (Array.isArray(r.relativeDayMarkers)) out.relativeDayMarkers = out.relativeDayMarkers.concat(r.relativeDayMarkers);
+    if (Array.isArray(r.panelsRead)) out.panelsRead = (out.panelsRead || []).concat(r.panelsRead.map(Number).filter(n => n > 0));
+    if (Array.isArray(r.dateEvidence)) out.dateEvidence = (out.dateEvidence || []).concat(r.dateEvidence.filter(Boolean));
     if (Array.isArray(r.dateEvents)) out.dateEvents = out.dateEvents.concat(r.dateEvents);
     // Sections often describe the same overall arc; don't repeat it.
     if (r.summary && !normaliseMsg(out.summary).includes(normaliseMsg(r.summary).slice(0, 40))) {
@@ -9368,17 +9939,96 @@ function LockPanel({
   }, err));
 }
 
+// ---------- Calendar ----------
+// No Google account linkage is needed for this: a template link opens a
+// pre-filled event, and the .ics carries a stable UID so re-importing updates
+// the same event rather than creating a second one.
+
+function dateEventTimes(entry) {
+  // Dates are stored by day; a time may be sitting in the notes ("Time: 2:30").
+  const m = (entry.notes || '').match(/(\d{1,2})[:.](\d{2})\s*(am|pm)?/i);
+  let hour = 19,
+    minute = 0; // sensible default: evening
+  if (m) {
+    hour = parseInt(m[1], 10);
+    minute = parseInt(m[2], 10);
+    const ampm = (m[3] || '').toLowerCase();
+    if (ampm === 'pm' && hour < 12) hour += 12;
+    if (ampm === 'am' && hour === 12) hour = 0;
+    if (!ampm && hour < 8) hour += 12; // "2:30" on a date means half two in the afternoon
+  }
+  const start = new Date(entry.date + 'T00:00:00');
+  start.setHours(hour, minute, 0, 0);
+  const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+  return {
+    start,
+    end
+  };
+}
+function stampUTC(d) {
+  return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+}
+function calendarTitle(person, entry) {
+  const n = (person.dates || []).filter(d => d.status === 'Completed' || d.status === 'Upcoming').sort((a, b) => (a.date || '').localeCompare(b.date || '')).findIndex(d => d.id === entry.id);
+  const which = n >= 0 ? ordinal(n + 1) + ' date' : 'Date';
+  return which + ' — ' + person.name;
+}
+function googleCalendarUrl(person, entry) {
+  const {
+    start,
+    end
+  } = dateEventTimes(entry);
+  const details = [entry.activity || '', entry.notes ? entry.notes.replace(/From chat import/, '').trim() : '', 'Logged in Relationship Tracker.'].filter(Boolean).join('\n');
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: calendarTitle(person, entry),
+    dates: stampUTC(start) + '/' + stampUTC(end),
+    details,
+    location: entry.location || ''
+  });
+  return 'https://calendar.google.com/calendar/render?' + params.toString();
+}
+function icsForDate(person, entry, sequence) {
+  const {
+    start,
+    end
+  } = dateEventTimes(entry);
+  const esc = t => String(t || '').replace(/([,;\\])/g, '\\$1').replace(/\n/g, '\\n');
+  const uid = 'rt-' + entry.id + '@relationship-tracker';
+  return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Relationship Tracker//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'BEGIN:VEVENT', 'UID:' + uid, 'SEQUENCE:' + (sequence || 0), 'DTSTAMP:' + stampUTC(new Date()), 'DTSTART:' + stampUTC(start), 'DTEND:' + stampUTC(end), 'SUMMARY:' + esc(calendarTitle(person, entry)), 'LOCATION:' + esc(entry.location || ''), 'DESCRIPTION:' + esc((entry.notes || '') + (entry.notes ? '\n' : '') + 'Logged in Relationship Tracker.'), 'STATUS:' + (entry.status === 'Cancelled' ? 'CANCELLED' : 'CONFIRMED'), 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
+}
+function downloadIcs(person, entry, sequence) {
+  const data = 'data:text/calendar;charset=utf-8,' + encodeURIComponent(icsForDate(person, entry, sequence));
+  downloadDataUrl(data, (person.name + '-' + entry.date).replace(/\s+/g, '-').toLowerCase() + '.ics');
+}
+
 // ---------- Version ----------
 // Semantic versioning: MAJOR.MINOR.PATCH. MAJOR for breaking changes to the data
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.5.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '1.5.0',
+  date: '2026-08-04',
+  changes: [['added', 'Import reports the date range a chat covers, before and after saving'], ['added', 'The reader hunts for date evidence — dividers, timestamps, match banners, the phone status bar — and reports what it found'], ['fixed', 'Historical chats were dragged to the present: relative dividers now resolve against the dates in the same image'], ['changed', 'A weekday divider reads forward from the date above it, so "Monday" between 14 and 20 July 2024 is the 15th'], ['changed', 'Undated sessions sit with their neighbours rather than defaulting to today']]
+}, {
+  version: '1.4.0',
+  date: '2026-08-03',
+  changes: [['fixed', 'Screenshot reading was inconsistent: failed sections were abandoned rather than retried'], ['added', 'Every section gets three attempts, including when it comes back empty'], ['added', 'Panel coverage is verified — the model must account for every panel, and anything unread is read again'], ['added', 'Import reports how much of the image was read, and names any panel it could not read'], ['changed', 'Extraction runs at temperature 0, so the same screenshot reads the same way twice']]
+}, {
+  version: '1.3.0',
+  date: '2026-08-03',
+  changes: [['added', 'Confirmation before anything is deleted — a person, a date, a photo, a line, or the whole conversation'], ['added', 'Delete warnings say what goes with it: date count, days of messages, photos'], ['changed', 'Rolling back a version or replacing on import now needs a second, explicit confirmation']]
+}, {
+  version: '1.2.0',
+  date: '2026-08-03',
+  changes: [['added', 'Dates can be sent to Google Calendar, or downloaded as .ics — re-adding updates the same event'], ['changed', 'Chat reading ignores photos, stickers and link previews unless they carry a fact worth keeping'], ['fixed', 'Spaces and line breaks were being stripped as you typed in "Things you have clocked", interests and socials']]
+}, {
   version: '1.1.1',
   date: '2026-08-03',
   changes: [['fixed', 'Top of tall dialogs was unreachable on desktop — Settings, the API key field and other forms now scroll fully'], ['fixed', 'Sticky headers and footers in dialogs sat under the content they should cover']]
@@ -9467,6 +10117,37 @@ function versionIsNewer(a, b) {
     if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
   }
   return false;
+}
+
+// One dialog for anything destructive. Deleting is instant and there is no undo,
+// so nothing that removes data should happen on a single tap.
+
+function ConfirmModal({
+  title,
+  body,
+  detail,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  danger = true
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 bg-black/60 z-[80] flex items-center justify-center p-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "font-serif text-lg mb-1"
+  }, title), /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-700"
+  }, body), detail && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-500 mt-1.5"
+  }, detail), /*#__PURE__*/React.createElement("button", {
+    onClick: onConfirm,
+    className: `mt-4 w-full rounded-md py-2 text-sm font-medium text-white ${danger ? 'bg-red-700 hover:bg-red-800' : 'bg-stone-900 hover:bg-stone-800'}`
+  }, confirmLabel), /*#__PURE__*/React.createElement("button", {
+    onClick: onCancel,
+    className: "mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
+  }, "Keep it")));
 }
 function ChangelogModal({
   onClose,
@@ -9588,6 +10269,7 @@ function RelationshipTracker() {
   const hiddenAt = React.useRef(null);
   const [lockVersion, setLockVersion] = useState(0);
   const [showChangelog, setShowChangelog] = useState(null); // 'all' | a version string
+  const [confirmAction, setConfirmAction] = useState(null); // { title, body, detail, confirmLabel, run }
   const [syncState, setSyncState] = useState({
     status: Sync.configured() ? 'idle' : 'off',
     last: Sync.lastPull(),
@@ -9947,6 +10629,26 @@ function RelationshipTracker() {
     } : p));
     setNotice('Marked as ended in ' + endYm + '. Edit the details if that is not right.');
   }
+  function askConfirm(opts) {
+    setConfirmAction(opts);
+  }
+  async function addDateToCalendar(entry, how) {
+    if (!selected) return;
+    const seq = (entry.calendarSeq || 0) + 1;
+    if (how === 'google') {
+      window.open(googleCalendarUrl(selected, entry), '_blank', 'noopener');
+    } else {
+      downloadIcs(selected, entry, seq);
+    }
+    // Bump the sequence so a re-export supersedes the earlier version.
+    await persist(peopleRef.current.map(p => p.id === selected.id ? {
+      ...p,
+      dates: (p.dates || []).map(d => d.id === entry.id ? {
+        ...d,
+        calendarSeq: seq
+      } : d)
+    } : p));
+  }
   async function saveContactNote(entry) {
     if (!selected) return;
     const log = [...(selected.contactLog || [])];
@@ -10158,7 +10860,7 @@ function RelationshipTracker() {
     } = mergeSessions(target.conversationDays, incoming, knownKeys);
     if (!addedPoints && !addedFacts) {
       const why = dropped ? 'Everything in that screenshot was already logged for ' + target.name + ' — nothing new added.' : !payload.sessions.length ? 'No conversation could be read from that image. If the text is very small, try splitting the screenshot into two or three shorter ones.' : 'The image was read but nothing worth logging came out of it — it may be all small talk.';
-      setError(why + (payload.imageWarnings && payload.imageWarnings.length ? ' ' + payload.imageWarnings.join(' ') : '') + (payload.failedSections && payload.failedSections.length ? ' Sections ' + payload.failedSections.join(', ') + ' failed to read.' : ''));
+      setError(why + (payload.coverage && payload.coverage.total ? ' (' + payload.coverage.read + ' of ' + payload.coverage.total + ' panels read.)' : '') + (payload.imageWarnings && payload.imageWarnings.length ? ' ' + payload.imageWarnings.join(' ') : '') + (payload.coverage && payload.coverage.missing && payload.coverage.missing.length ? ' Panels ' + payload.coverage.missing.join(', ') + ' failed after three attempts each.' : ''));
       return {
         added: 0,
         dropped
@@ -10187,7 +10889,8 @@ function RelationshipTracker() {
     } : p));
     setError('');
     const matchNote = !target.dateMet && !payload.matchedDate && inferredMatch ? ' Match date set to ' + inferredMatch + ' from the first message — edit if wrong.' : '';
-    setNotice(addedPoints + ' line' + (addedPoints === 1 ? '' : 's') + ' and ' + addedFacts + ' fact' + (addedFacts === 1 ? '' : 's') + ' added to ' + target.name + (dropped ? ', ' + dropped + ' duplicate' + (dropped === 1 ? '' : 's') + ' skipped' : '') + '.' + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : '') + (payload.imageWarnings && payload.imageWarnings.length ? ' ' + payload.imageWarnings[0] : '') + (payload.failedSections && payload.failedSections.length ? ' Note: ' + payload.failedSections.length + ' section(s) of the image could not be read, so some of the conversation may be missing.' : '') + matchNote);
+    const range = sessionDateRange(incoming);
+    setNotice((range ? 'Chat covers ' + formatDateRange(range) + '. ' : '') + addedPoints + ' line' + (addedPoints === 1 ? '' : 's') + ' and ' + addedFacts + ' fact' + (addedFacts === 1 ? '' : 's') + ' added to ' + target.name + (dropped ? ', ' + dropped + ' duplicate' + (dropped === 1 ? '' : 's') + ' skipped' : '') + '.' + (payload.lowConfidence ? ' Speaker attribution was unclear — check it.' : '') + (payload.coverage && payload.coverage.total ? ' Read ' + payload.coverage.read + ' of ' + payload.coverage.total + ' panels.' : '') + (payload.imageWarnings && payload.imageWarnings.length ? ' ' + payload.imageWarnings[0] : '') + (payload.coverage && payload.coverage.missing && payload.coverage.missing.length ? ' Panels ' + payload.coverage.missing.join(', ') + ' could not be read after retrying — reimport that part of the chat.' : '') + matchNote);
     return {
       added: addedPoints,
       dropped
@@ -10451,7 +11154,22 @@ function RelationshipTracker() {
     }, /*#__PURE__*/React.createElement(Pencil, {
       className: "w-4 h-4"
     })), /*#__PURE__*/React.createElement("button", {
-      onClick: () => removePerson(selected.id),
+      onClick: () => askConfirm({
+        title: 'Delete ' + selected.name + '?',
+        body: 'Everything held on her goes: profile, photos, the whole timeline, dates, your notes and your read.',
+        detail: (() => {
+          const bits = [];
+          const dts = (selected.dates || []).length;
+          const days = (selected.conversationDays || []).length;
+          const phs = (selected.photos || []).length;
+          if (dts) bits.push(dts + ' date' + (dts === 1 ? '' : 's'));
+          if (days) bits.push(days + ' day' + (days === 1 ? '' : 's') + ' of messages');
+          if (phs) bits.push(phs + ' photo' + (phs === 1 ? '' : 's'));
+          return bits.length ? 'This removes ' + bits.join(', ') + '. There is no undo, though a backup or the sync history can bring her back.' : 'There is no undo.';
+        })(),
+        confirmLabel: 'Delete her record',
+        run: () => removePerson(selected.id)
+      }),
       className: "p-1.5 text-stone-500 hover:text-red-700 rounded focus:outline-none focus:ring-2 focus:ring-stone-900"
     }, /*#__PURE__*/React.createElement(Trash2, {
       className: "w-4 h-4"
@@ -10462,7 +11180,10 @@ function RelationshipTracker() {
         className: "bg-white border border-stone-200 rounded-lg p-3 mb-4 text-sm"
       }, next ? /*#__PURE__*/React.createElement("span", {
         className: "text-emerald-800 font-medium"
-      }, "Next date ", formatDayLabel(next.date), " — ", next.location || 'venue TBC') : quiet === null ? /*#__PURE__*/React.createElement("span", {
+      }, "Next date ", formatDayLabel(next.date), " — ", next.location || 'venue TBC', /*#__PURE__*/React.createElement("button", {
+        onClick: () => addDateToCalendar(next, 'google'),
+        className: "ml-2 text-xs underline text-stone-600 hover:text-stone-900"
+      }, "Add to calendar")) : quiet === null ? /*#__PURE__*/React.createElement("span", {
         className: "text-stone-500"
       }, "No activity logged yet.") : /*#__PURE__*/React.createElement("span", {
         className: quiet >= 21 ? 'text-red-700' : quiet >= 7 ? 'text-amber-700' : 'text-stone-600'
@@ -10498,7 +11219,12 @@ function RelationshipTracker() {
       onView: setLightbox,
       profilePhotoId: selected.profilePhotoId,
       onAddFiles: addPhotosToSelected,
-      onDelete: deletePhoto,
+      onDelete: id => askConfirm({
+        title: 'Delete this photo?',
+        body: 'It is removed from her record on every device once this syncs.',
+        confirmLabel: 'Delete photo',
+        run: () => deletePhoto(id)
+      }),
       onSetProfile: setProfilePhoto
     }), unresolvedDates(selected).length > 0 && /*#__PURE__*/React.createElement("div", {
       className: "bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4"
@@ -10521,8 +11247,20 @@ function RelationshipTracker() {
       summary: selected.chatSummary || '',
       chronology: buildChronology(selected),
       onAddFiles: addConversationFromFiles,
-      onDelete: deleteConversationEntry,
-      onClear: clearConversation,
+      onDelete: id => askConfirm({
+        title: 'Delete this line?',
+        body: 'One line of the conversation record is removed.',
+        detail: 'The day summary and facts stay as they are.',
+        confirmLabel: 'Delete line',
+        run: () => deleteConversationEntry(id)
+      }),
+      onClear: () => askConfirm({
+        title: 'Clear the whole conversation?',
+        body: 'Every summarised day, fact and line for ' + selected.name + ' is removed so you can reimport the screenshots fresh.',
+        detail: 'Dates, photos, contact notes and your own write-ups are untouched.',
+        confirmLabel: 'Clear conversation',
+        run: clearConversation
+      }),
       onEditDate: startEditDate,
       onAddContact: () => setContactNote({}),
       onEditContact: c => setContactNote(c),
@@ -10596,7 +11334,13 @@ function RelationshipTracker() {
       }, /*#__PURE__*/React.createElement(Pencil, {
         className: "w-4 h-4"
       })), /*#__PURE__*/React.createElement("button", {
-        onClick: () => removeDate(d.id),
+        onClick: () => askConfirm({
+          title: 'Delete this date?',
+          body: (d.date ? formatDayLabel(d.date) : 'This date') + (d.location ? ' at ' + d.location : '') + ' will be removed.',
+          detail: (d.notes || '').trim() ? 'Your write-up of it goes too, and nothing else records what happened.' : 'There is no undo.',
+          confirmLabel: 'Delete date',
+          run: () => removeDate(d.id)
+        }),
         className: "p-1.5 text-stone-500 hover:text-red-700 rounded focus:outline-none focus:ring-2 focus:ring-stone-900"
       }, /*#__PURE__*/React.createElement(Trash2, {
         className: "w-4 h-4"
@@ -10628,6 +11372,17 @@ function RelationshipTracker() {
       onTakeRemote: () => resolveConflict('remote'),
       onMerge: () => resolveConflict('merge'),
       onCancel: () => setSyncConflict(null)
+    }), confirmAction && /*#__PURE__*/React.createElement(ConfirmModal, {
+      title: confirmAction.title,
+      body: confirmAction.body,
+      detail: confirmAction.detail,
+      confirmLabel: confirmAction.confirmLabel,
+      onCancel: () => setConfirmAction(null),
+      onConfirm: async () => {
+        const run = confirmAction.run;
+        setConfirmAction(null);
+        await run();
+      }
     }), showChangelog && /*#__PURE__*/React.createElement(ChangelogModal, {
       sinceVersion: showChangelog === 'all' ? null : showChangelog,
       onClose: () => setShowChangelog(null)
@@ -10648,7 +11403,11 @@ function RelationshipTracker() {
       setForm: setDateForm,
       isNew: dateEditId === 'new',
       onCancel: cancelDateForm,
-      onSave: saveDateForm
+      onSave: saveDateForm,
+      onAddToCalendar: dateEditId && dateEditId !== 'new' ? how => addDateToCalendar({
+        ...dateForm,
+        id: dateEditId
+      }, how) : null
     }), showPersonForm && /*#__PURE__*/React.createElement(PersonFormModal, {
       form: personForm,
       setForm: setPersonForm,
@@ -10676,6 +11435,17 @@ function RelationshipTracker() {
       onShowChangelog: () => setShowChangelog('all'),
       onShowChangelog: () => setShowChangelog('all'),
       lockVersion: lockVersion
+    }), confirmAction && /*#__PURE__*/React.createElement(ConfirmModal, {
+      title: confirmAction.title,
+      body: confirmAction.body,
+      detail: confirmAction.detail,
+      confirmLabel: confirmAction.confirmLabel,
+      onCancel: () => setConfirmAction(null),
+      onConfirm: async () => {
+        const run = confirmAction.run;
+        setConfirmAction(null);
+        await run();
+      }
     }), showChangelog && /*#__PURE__*/React.createElement(ChangelogModal, {
       sinceVersion: showChangelog === 'all' ? null : showChangelog,
       onClose: () => setShowChangelog(null)
@@ -11267,7 +12037,8 @@ function DateFormModal({
   setForm,
   isNew,
   onCancel,
-  onSave
+  onSave,
+  onAddToCalendar
 }) {
   const avg = overallAvg(form);
   return /*#__PURE__*/React.createElement(ModalShell, {
@@ -11378,7 +12149,25 @@ function DateFormModal({
     style: fieldScrollMargin,
     placeholder: "e.g. Second date booked, No spark, TBD",
     className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
-  })), /*#__PURE__*/React.createElement(Field, {
+  })), form.date && form.status !== 'Proposed' && onAddToCalendar && /*#__PURE__*/React.createElement("div", {
+    className: "border border-stone-200 rounded-md p-2.5 bg-stone-50"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-stone-600 mb-2"
+  }, "Put this in your calendar. Re-adding after a change updates the same event rather than making a second one."), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-2"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => onAddToCalendar('google'),
+    className: "flex-1 flex items-center justify-center gap-1.5 border border-stone-300 bg-white rounded-md py-1.5 text-sm font-medium hover:bg-stone-100"
+  }, /*#__PURE__*/React.createElement(Calendar, {
+    className: "w-3.5 h-3.5"
+  }), " Google Calendar"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => onAddToCalendar('ics'),
+    className: "flex-1 flex items-center justify-center gap-1.5 border border-stone-300 bg-white rounded-md py-1.5 text-sm font-medium hover:bg-stone-100"
+  }, /*#__PURE__*/React.createElement(Download, {
+    className: "w-3.5 h-3.5"
+  }), " .ics file"))), /*#__PURE__*/React.createElement(Field, {
     label: form.status === 'Upcoming' ? 'Notes' : 'How it went — your record',
     hint: form.status === 'Upcoming' ? null : 'Nothing about the date itself is captured anywhere else. What she said, how she was, what you made of it.'
   }, /*#__PURE__*/React.createElement("textarea", {
@@ -11467,7 +12256,9 @@ function ChatDateConfirmModal({
     className: "font-serif text-lg"
   }, "Confirm the date")), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-700"
-  }, "That chat shows ", /*#__PURE__*/React.createElement("strong", null, markerText), ", so the calendar date isn't certain.", ` ${payload.sessions.length} session${payload.sessions.length === 1 ? '' : 's'} need a date.`), /*#__PURE__*/React.createElement("p", {
+  }, "That chat shows ", /*#__PURE__*/React.createElement("strong", null, markerText), ", so the calendar date isn't certain.", ` ${payload.sessions.length} session${payload.sessions.length === 1 ? '' : 's'} need a date.`), payload.dateRange && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-700 mt-1"
+  }, "The dated parts of this chat run ", formatDateRange(payload.dateRange), "."), /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-stone-500 mt-1"
   }, "The lines will be slotted into the conversation in date order."), /*#__PURE__*/React.createElement("input", {
     type: "date",
@@ -11671,11 +12462,18 @@ function MyReadModal({
     ...x,
     [k]: v
   }));
+  // Splitting on every keystroke ate spaces and newlines, so the raw text is
+  // held as typed and only split when saving.
+  const [flagsText, setFlagsText] = useState(() => (myRead && myRead.flags || []).join('\n'));
+  const commit = () => onSave({
+    ...d,
+    flags: flagsText.split('\n').map(t => t.trim()).filter(Boolean)
+  });
   const inputCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
   return /*#__PURE__*/React.createElement(ModalShell, {
     title: "Where you stand",
     onCancel: onCancel,
-    onSave: () => onSave(d)
+    onSave: commit
   }, /*#__PURE__*/React.createElement(Field, {
     label: "What do you want here?",
     hint: "Be honest — the advice changes completely"
@@ -11760,11 +12558,11 @@ function MyReadModal({
     label: "Things you have clocked",
     hint: "One per line — anything that gave you pause"
   }, /*#__PURE__*/React.createElement("textarea", {
-    value: (d.flags || []).join('\n'),
+    value: flagsText,
     rows: 3,
     onFocus: focusScroll,
     style: fieldScrollMargin,
-    onChange: e => set('flags', e.target.value.split('\n').map(t => t.trim()).filter(Boolean)),
+    onChange: e => setFlagsText(e.target.value),
     placeholder: 'Still talks about her ex\nCancelled twice',
     className: inputCls
   })), /*#__PURE__*/React.createElement(Field, {
@@ -11929,6 +12727,14 @@ function ProfileEditModal({
     ...d,
     [k]: v
   }));
+  const [interestsText, setInterestsText] = useState(() => (profile && profile.interests || []).join(', '));
+  const [socialsText, setSocialsText] = useState(() => (profile && profile.socials || []).join(', '));
+  const splitList = t => t.split(',').map(x => x.trim()).filter(Boolean);
+  const commitProfile = () => onSave({
+    ...draft,
+    interests: splitList(interestsText),
+    socials: splitList(socialsText)
+  });
   const inputCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
   function setPrompt(i, key, v) {
     setDraft(d => ({
@@ -11942,7 +12748,7 @@ function ProfileEditModal({
   return /*#__PURE__*/React.createElement(ModalShell, {
     title: "Profile details",
     onCancel: onCancel,
-    onSave: () => onSave(draft)
+    onSave: commitProfile
   }, PROFILE_GROUPS.map(group => /*#__PURE__*/React.createElement("div", {
     key: group
   }, /*#__PURE__*/React.createElement("div", {
@@ -11962,10 +12768,10 @@ function ProfileEditModal({
     label: "Interests",
     hint: "Comma separated"
   }, /*#__PURE__*/React.createElement("input", {
-    value: (draft.interests || []).join(', '),
+    value: interestsText,
     onFocus: focusScroll,
     style: fieldScrollMargin,
-    onChange: e => set('interests', e.target.value.split(',').map(t => t.trim()).filter(Boolean)),
+    onChange: e => setInterestsText(e.target.value),
     className: inputCls
   })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between mb-1"
@@ -12025,10 +12831,10 @@ function ProfileEditModal({
     label: "Socials",
     hint: "Comma separated"
   }, /*#__PURE__*/React.createElement("input", {
-    value: (draft.socials || []).join(', '),
+    value: socialsText,
     onFocus: focusScroll,
     style: fieldScrollMargin,
-    onChange: e => set('socials', e.target.value.split(',').map(t => t.trim()).filter(Boolean)),
+    onChange: e => setSocialsText(e.target.value),
     className: inputCls
   })));
 }
@@ -12248,7 +13054,6 @@ function ConversationSection({
   const items = chronology || [];
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [confirmClear, setConfirmClear] = useState(false);
   const [openDetail, setOpenDetail] = useState({});
   const inputRef = React.useRef(null);
   async function handleFiles(e) {
@@ -12296,17 +13101,8 @@ function ConversationSection({
     className: "text-xs text-red-700 mb-2"
   }, err), hasChat && /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-2 mb-3"
-  }, confirmClear ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setConfirmClear(false);
-      onClear();
-    },
-    className: "text-xs text-white bg-red-700 rounded px-2 py-1"
-  }, "Delete all chat"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setConfirmClear(false),
-    className: "text-xs text-stone-500 px-1"
-  }, "Cancel")) : /*#__PURE__*/React.createElement("button", {
-    onClick: () => setConfirmClear(true),
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClear,
     className: "text-xs text-stone-600 border border-stone-300 rounded px-2 py-1 hover:bg-stone-100"
   }, "Clear chat & reimport")), needsSummary > 0 && /*#__PURE__*/React.createElement("div", {
     className: "mb-3 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 flex items-center justify-between gap-3"
@@ -12984,7 +13780,22 @@ function ChatImportModal({
     className: "text-sm"
   }, /*#__PURE__*/React.createElement("strong", null, payload.contactName || 'No name found'), payload.appName ? ' · ' + payload.appName : ''), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-stone-500 mt-0.5"
-  }, payload.totalPoints, " line", payload.totalPoints === 1 ? '' : 's', " across ", payload.sessions.length, " day", payload.sessions.length === 1 ? '' : 's', payload.matchedDate ? ' · matched ' + payload.matchedDate : ''), payload.summary && /*#__PURE__*/React.createElement("p", {
+  }, payload.totalPoints, " line", payload.totalPoints === 1 ? '' : 's', " across ", payload.sessions.length, " day", payload.sessions.length === 1 ? '' : 's', payload.matchedDate ? ' · matched ' + payload.matchedDate : ''), payload.dateRange && /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-stone-700 mt-1"
+  }, "Covers ", formatDateRange(payload.dateRange)), !payload.dateRange && /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-amber-700 mt-1"
+  }, "No date could be found in this image — set one below or it will be filed under today."), payload.dateEvidence && payload.dateEvidence.length > 0 && /*#__PURE__*/React.createElement("details", {
+    className: "mt-1"
+  }, /*#__PURE__*/React.createElement("summary", {
+    className: "text-[11px] text-stone-400 cursor-pointer"
+  }, "How the dates were worked out"), /*#__PURE__*/React.createElement("ul", {
+    className: "mt-1 space-y-0.5"
+  }, payload.dateEvidence.slice(0, 8).map((e, i) => /*#__PURE__*/React.createElement("li", {
+    key: i,
+    className: "text-[11px] text-stone-500"
+  }, e)))), payload.coverage && payload.coverage.total > 0 && /*#__PURE__*/React.createElement("div", {
+    className: `text-xs mt-0.5 ${payload.coverage.missing.length ? 'text-amber-700' : 'text-emerald-700'}`
+  }, payload.coverage.missing.length ? 'Read ' + payload.coverage.read + ' of ' + payload.coverage.total + ' panels — panels ' + payload.coverage.missing.join(', ') + ' could not be read' : 'Whole image read — ' + payload.coverage.total + ' of ' + payload.coverage.total + ' panels'), payload.summary && /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-700 mt-1.5"
   }, payload.summary), payload.lowConfidence && /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-amber-700 mt-1.5"
@@ -13113,6 +13924,7 @@ function RestorePanel({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [preview, setPreview] = useState(null);
+  const [confirmRollback, setConfirmRollback] = useState(false);
   async function load() {
     setBusy(true);
     setErr('');
@@ -13134,6 +13946,7 @@ function RestorePanel({
         version: v.version,
         at: v.at
       });
+      setConfirmRollback(false);
     } catch (e) {
       setErr(String(e.message || e));
     }
@@ -13176,9 +13989,13 @@ function RestorePanel({
     onClick: () => onMerge(preview.people),
     className: "mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800"
   }, "Merge this version in"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => onReplace(preview.people),
-    className: "mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
-  }, "Roll everything back to this"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (confirmRollback) onReplace(preview.people);else setConfirmRollback(true);
+    },
+    className: `mt-2 w-full rounded-md py-2 text-sm font-medium ${confirmRollback ? 'bg-red-700 text-white hover:bg-red-800' : 'border border-stone-300 hover:bg-stone-100'}`
+  }, confirmRollback ? 'Yes — discard what is here and use this version' : 'Roll everything back to this'), confirmRollback && /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-red-700 mt-1"
+  }, "Anything added since this version will be lost. Merging is the safe option."), /*#__PURE__*/React.createElement("button", {
     onClick: () => setPreview(null),
     className: "w-full text-sm text-stone-500 py-2"
   }, "Back to the list")));
@@ -13424,6 +14241,7 @@ function SettingsModal({
   const [saved, setSaved] = useState(false);
   const [importErr, setImportErr] = useState('');
   const [pending, setPending] = useState(null);
+  const [confirmReplace, setConfirmReplace] = useState(false);
   const importInputRef = React.useRef(null);
   function saveKey() {
     Local.set('anthropic-api-key', apiKey.trim());
@@ -13465,6 +14283,7 @@ function SettingsModal({
           preview,
           exportedAt: parsed.exportedAt || ''
         });
+        setConfirmReplace(false);
       } catch (err) {
         setImportErr('Could not read that file — expecting a backup exported from this app.');
       }
@@ -13563,9 +14382,11 @@ function SettingsModal({
     onClick: doMerge,
     className: "mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800"
   }, "Merge — keep both"), /*#__PURE__*/React.createElement("button", {
-    onClick: doReplace,
-    className: "mt-2 w-full border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
-  }, "Replace everything on this device"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (confirmReplace) doReplace();else setConfirmReplace(true);
+    },
+    className: `mt-2 w-full rounded-md py-2 text-sm font-medium ${confirmReplace ? 'bg-red-700 text-white hover:bg-red-800' : 'border border-stone-300 hover:bg-stone-100'}`
+  }, confirmReplace ? 'Yes — delete the ' + people.length + ' on this device and use the file' : 'Replace everything on this device'), /*#__PURE__*/React.createElement("button", {
     onClick: () => setPending(null),
     className: "w-full text-sm text-stone-500 py-2"
   }, "Cancel"), /*#__PURE__*/React.createElement("p", {
