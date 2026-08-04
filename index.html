@@ -398,7 +398,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-03 19:35';
+const BUILD_STAMP = '2026-08-04 18:25';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -418,10 +418,15 @@ const Sync = {
     if (gistId) Local.set('rt:gist-id', gistId);
   },
   markPulled(stamp) { Local.set('rt:last-pull', stamp || ''); },
+  // Set whenever this device changes something, cleared once it reaches the Gist.
+  markDirty() { Local.set('rt:unpushed', '1'); },
+  clearDirty() { Local.remove('rt:unpushed'); },
+  isDirty() { return Local.get('rt:unpushed') === '1'; },
   clear() {
     Local.remove('rt:gh-token');
     Local.remove('rt:gist-id');
     Local.remove('rt:last-pull');
+    Local.remove('rt:unpushed');
   },
 };
 
@@ -678,6 +683,20 @@ function briefNextStep(read) {
   if (!read || !read.recommendation) return '';
   const first = read.recommendation.split(/(?<=[.!?])\s+/)[0] || read.recommendation;
   return first.length > 120 ? first.slice(0, 117).trimEnd() + '…' : first;
+}
+
+// Past three months, a day count stops meaning anything. Months round down, so
+// 115 days is three months, not "nearly four".
+function formatGap(days) {
+  if (days === null || days === undefined) return '';
+  if (days < 90) return days + (days === 1 ? ' day' : ' days');
+  // Count whole years off first, or 365 days reads as "11 months".
+  const years = Math.floor(days / 365);
+  const rem = Math.floor((days - years * 365) / 30.44);
+  const months = Math.floor(days / 30.44);
+  if (!years) return months + ' months';
+  const yPart = years + (years === 1 ? ' year' : ' years');
+  return rem ? yPart + ' ' + rem + (rem === 1 ? ' month' : ' months') : yPart;
 }
 
 function daysQuiet(person) {
@@ -2308,7 +2327,7 @@ function buildCoachContext(person, brief) {
   if (missing.length) lines.push(missing.length + ' completed date(s) have no write-up from you.');
 
   const quiet = daysQuiet(person);
-  if (quiet !== null) lines.push('Days since last logged activity: ' + quiet);
+  if (quiet !== null) lines.push('Time since the last logged activity: ' + formatGap(quiet) + ' (' + quiet + ' days).');
   const next = (person.dates || []).find(d => d.status === 'Upcoming' && d.date >= TODAY());
   if (next) lines.push('Date already booked: ' + next.date + ' at ' + (next.location || 'venue TBC'));
   lines.push('Today is ' + TODAY() + '.');
@@ -2749,6 +2768,209 @@ function LockPanel({ onChanged }) {
   );
 }
 
+// ---------- Version ----------
+// Semantic versioning: MAJOR.MINOR.PATCH. MAJOR for breaking changes to the data
+// shape, MINOR for new features, PATCH for fixes. The build stamp below is the
+// compile time, used to confirm which build a device is actually running.
+
+const APP_VERSION = '1.1.1';
+
+// Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
+// removed / security. Versions before 1.1.0 were reconstructed from the
+// development history, so their dates are approximate.
+const CHANGELOG = [
+  {
+    version: '1.1.1', date: '2026-08-03', changes: [
+      ['fixed', 'Top of tall dialogs was unreachable on desktop — Settings, the API key field and other forms now scroll fully'],
+      ['fixed', 'Sticky headers and footers in dialogs sat under the content they should cover'],
+    ],
+  },
+  {
+    version: '1.1.0', date: '2026-08-03', changes: [
+      ['added', 'Version numbering and this changelog, reachable from Settings'],
+      ['added', "What's new shown once after an update"],
+    ],
+  },
+  {
+    version: '1.0.1', date: '2026-08-03', changes: [
+      ['fixed', 'Add person button pushed off screen on mobile — the header now wraps'],
+      ['changed', 'Gaps over 90 days read as months and years, rounded down, instead of a day count'],
+      ['fixed', 'Duplicated props on the Settings mount'],
+    ],
+  },
+  {
+    version: '1.0.0', date: '2026-08-03', changes: [
+      ['added', '"Where you stand": your intention, your own interest level, attraction, logistics and dealbreakers'],
+      ['added', 'Red flags called out by the coach, graded note / watch / serious'],
+      ['added', 'Interest gap between your level and hers'],
+      ['added', 'Merge on import — combine two devices instead of replacing one'],
+      ['added', 'Restore from Gist revision history in Settings'],
+      ['changed', 'Coaching now follows your stated intention rather than assuming a long-term goal'],
+      ['changed', 'Lighter, drier coaching tone'],
+      ['fixed', 'Records without an ID could merge into the wrong person'],
+      ['fixed', 'Sync conflict dialog had no way to cancel; now offers combine and decide-later'],
+      ['fixed', 'Startup no longer overwrites unpushed local changes silently'],
+    ],
+  },
+  {
+    version: '0.14.0', date: '2026-08-03', changes: [
+      ['changed', 'Long screenshots read in sections of four panels, two at a time'],
+      ['changed', 'Panels encoded one at a time — memory stays flat however long the image'],
+      ['added', 'Two-minute request timeout with one automatic retry'],
+      ['added', 'The coach read degrades through three stages rather than failing'],
+      ['fixed', 'Chunked retry discarded everything, so long chats always failed'],
+      ['fixed', 'Truncated replies are repaired at any nesting depth'],
+      ['added', 'Screenshot dimensions checked before spending a read'],
+    ],
+  },
+  {
+    version: '0.13.0', date: '2026-08-03', changes: [
+      ['added', 'App lock with a passcode and device biometrics'],
+      ['added', 'Re-locks after five minutes in the background'],
+    ],
+  },
+  {
+    version: '0.12.0', date: '2026-08-03', changes: [
+      ['added', 'Relationship period by month, with span in years and months'],
+      ['added', 'Automatic classification: talking only through to long-term relationship'],
+      ['added', 'Closure state graded by how long ago it ended'],
+      ['added', 'Retrospective coaching for relationships that are over'],
+    ],
+  },
+  {
+    version: '0.11.0', date: '2026-08-03', changes: [
+      ['added', 'Dates and chat on one timeline'],
+      ['added', 'Post-date write-up treated as the only record of a date'],
+      ['added', 'Contact log for calls and meetings with no screenshot'],
+      ['added', 'Proposed status for dates that never happened'],
+    ],
+  },
+  {
+    version: '0.10.0', date: '2026-08-02', changes: [
+      ['added', "Doc Love's interest level, with a speedometer gauge"],
+      ['changed', 'All coaching written in the second person'],
+      ['added', 'Match date inferred from the first message'],
+    ],
+  },
+  {
+    version: '0.9.0', date: '2026-08-02', changes: [
+      ['added', 'Cross-device sync through a private GitHub Gist'],
+      ['added', 'Backup reminders and recovery guidance'],
+    ],
+  },
+  {
+    version: '0.8.0', date: '2026-08-02', changes: [
+      ['changed', 'Self-contained build — React inlined, JSX precompiled, no CDN'],
+      ['added', 'Crash guard so a render error shows a message instead of a blank screen'],
+    ],
+  },
+  {
+    version: '0.7.0', date: '2026-08-02', changes: [
+      ['added', 'Bulk chat import from the home screen, filed to existing or new people'],
+    ],
+  },
+  {
+    version: '0.6.0', date: '2026-08-02', changes: [
+      ['added', '"Where this stands" coaching read with vibe and next move'],
+      ['added', 'Dates spotted in chat offered as confirmable suggestions'],
+    ],
+  },
+  {
+    version: '0.5.0', date: '2026-08-02', changes: [
+      ['changed', 'Chat summarised by day rather than transcribed'],
+      ['added', 'Date confirmation when a chat shows only relative day dividers'],
+    ],
+  },
+  {
+    version: '0.4.0', date: '2026-08-01', changes: [
+      ['added', 'Chronological conversation timeline with duplicate detection'],
+      ['added', 'Warning when a chat name does not match the person'],
+      ['added', 'Several profiles imported in one go'],
+    ],
+  },
+  {
+    version: '0.3.0', date: '2026-08-01', changes: [
+      ['added', 'Structured profile extraction across 23 labelled fields'],
+      ['added', 'Tall screenshots sliced into panels so text stays readable'],
+      ['added', 'Photos cropped from profile screenshots'],
+    ],
+  },
+  {
+    version: '0.2.0', date: '2026-08-01', changes: [
+      ['added', 'Storage adapter so the app works outside the artifact frame'],
+      ['added', 'Upcoming dates, search, stage filters and Insights'],
+    ],
+  },
+  {
+    version: '0.1.0', date: '2026-08-01', changes: [
+      ['added', 'People, stages, dates, ratings, photos, notes, export and import'],
+    ],
+  },
+];
+
+const CHANGE_COLOURS = {
+  added: 'bg-emerald-50 text-emerald-800',
+  changed: 'bg-sky-50 text-sky-800',
+  fixed: 'bg-amber-50 text-amber-800',
+  removed: 'bg-stone-100 text-stone-600',
+  security: 'bg-violet-50 text-violet-800',
+};
+
+// Simple semver comparison, newest first.
+function versionIsNewer(a, b) {
+  const pa = String(a || '0.0.0').split('.').map(Number);
+  const pb = String(b || '0.0.0').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+  }
+  return false;
+}
+
+function ChangelogModal({ onClose, sinceVersion }) {
+  const unseen = sinceVersion ? CHANGELOG.filter(e => versionIsNewer(e.version, sinceVersion)) : [];
+  const showing = unseen.length ? unseen : CHANGELOG;
+  return (
+    <div className="fixed inset-0 bg-black/60 z-[70] flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-lg max-h-[85vh] overflow-y-auto">
+        <div className="sticky top-0 bg-white border-b border-stone-200 px-4 py-3 flex items-center justify-between">
+          <div>
+            <h3 className="font-serif text-lg">{unseen.length ? "What's new" : 'Version history'}</h3>
+            <p className="text-[11px] text-stone-400">Currently on {APP_VERSION}</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 text-stone-500 hover:text-stone-900"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="p-4 space-y-5">
+          {showing.map(entry => (
+            <div key={entry.version}>
+              <div className="flex items-baseline gap-2 mb-1.5">
+                <span className="text-sm font-semibold text-stone-900">{entry.version}</span>
+                <span className="text-xs text-stone-400">{entry.date}</span>
+                {entry.version === APP_VERSION && (
+                  <span className="text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5">current</span>
+                )}
+              </div>
+              <ul className="space-y-1">
+                {entry.changes.map(([type, text], i) => (
+                  <li key={i} className="flex items-start gap-2">
+                    <span className={`text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5 shrink-0 mt-0.5 ${CHANGE_COLOURS[type] || CHANGE_COLOURS.removed}`}>
+                      {type}
+                    </span>
+                    <span className="text-sm text-stone-700">{text}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          <p className="text-[11px] text-stone-400 border-t border-stone-100 pt-3">
+            Versions before 1.1.0 were reconstructed from the development history, so their dates are approximate.
+            Build {BUILD_STAMP}.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Crash guard ----------
 // A thrown render error would otherwise leave a blank white screen with no clue
 // what happened. Catch it, show it, and let the app be restarted without losing
@@ -2822,6 +3044,7 @@ function RelationshipTracker() {
   const [locked, setLocked] = useState(() => Lock.enabled());
   const hiddenAt = React.useRef(null);
   const [lockVersion, setLockVersion] = useState(0);
+  const [showChangelog, setShowChangelog] = useState(null);   // 'all' | a version string
   const [syncState, setSyncState] = useState({ status: Sync.configured() ? 'idle' : 'off', last: Sync.lastPull(), error: '' });
   const [syncConflict, setSyncConflict] = useState(null);
   const pushTimer = React.useRef(null);
@@ -2834,6 +3057,13 @@ function RelationshipTracker() {
   const [dateForm, setDateForm] = useState(emptyDateForm);
 
   useEffect(() => { load().then(() => { if (Sync.configured()) pullFromCloud(true); }); }, []);
+
+  // Show what changed the first time a device runs a new version.
+  useEffect(() => {
+    const seen = Local.get('rt:seen-version');
+    if (seen && versionIsNewer(APP_VERSION, seen)) setShowChangelog(seen);
+    Local.set('rt:seen-version', APP_VERSION);
+  }, []);
 
   // Re-lock after five minutes in the background, not on every glance away.
   useEffect(() => {
@@ -2886,6 +3116,7 @@ function RelationshipTracker() {
   // Push a few seconds after the last change, so a burst of edits is one upload.
   function schedulePush(next) {
     if (!Sync.configured() || !Sync.gistId()) return;
+    Sync.markDirty();
     if (pushTimer.current) clearTimeout(pushTimer.current);
     pushTimer.current = setTimeout(() => { pushToCloud(next); }, 2500);
   }
@@ -2895,6 +3126,7 @@ function RelationshipTracker() {
     setSyncState(s2 => ({ ...s2, status: 'syncing', error: '' }));
     try {
       const stamp = await ghPush(next || peopleRef.current);
+      Sync.clearDirty();
       setSyncState({ status: 'idle', last: stamp, error: '' });
     } catch (e) {
       setSyncState(s2 => ({ ...s2, status: 'error', error: String(e.message || e) }));
@@ -2907,26 +3139,40 @@ function RelationshipTracker() {
     setSyncState(s2 => ({ ...s2, status: 'syncing', error: '' }));
     try {
       const remote = await ghPull();
-      if (!remote) { setSyncState({ status: 'idle', last: Sync.lastPull(), error: '' }); return; }
+      if (!remote) {
+        setSyncState({ status: 'idle', last: Sync.lastPull(), error: '' });
+        if (!atStartup) setNotice('Nothing stored in sync yet.');
+        return;
+      }
       const localCount = peopleRef.current.length;
       const lastPull = Sync.lastPull();
       const remoteIsNewer = remote.updatedAt && (!lastPull || remote.updatedAt > lastPull);
 
       if (!remoteIsNewer) {
-        // Nothing new up there — make sure our copy is the one on record.
-        if (localCount) await pushToCloud(peopleRef.current);
-        else setSyncState({ status: 'idle', last: lastPull, error: '' });
+        if (localCount) {
+          await pushToCloud(peopleRef.current);
+          // Say so — silence here reads as "the button did nothing".
+          if (!atStartup) setNotice('Already up to date. Uploaded this device\'s copy — ' + localCount + ' people.');
+        } else {
+          setSyncState({ status: 'idle', last: lastPull, error: '' });
+          if (!atStartup) setNotice('Nothing here to upload, and nothing newer in sync.');
+        }
         return;
       }
-      if (atStartup || !localCount) {
+
+      // Remote is newer. Only take it outright when this device has nothing of
+      // its own at stake.
+      const safeToReplace = !localCount || (atStartup && !Sync.isDirty());
+      if (safeToReplace) {
         setPeople(remote.people);
         await DataStore.set('people-list', JSON.stringify(remote.people));
         Sync.markPulled(remote.updatedAt);
+        Sync.clearDirty();
         setSyncState({ status: 'idle', last: remote.updatedAt, error: '' });
-        if (!atStartup) setNotice('Pulled ' + remote.people.length + ' people from sync.');
+        setNotice('Downloaded the newer copy — ' + remote.people.length + ' people.');
         return;
       }
-      setSyncConflict({ remote, localCount });
+      setSyncConflict({ remote, localCount, unpushed: Sync.isDirty() });
       setSyncState({ status: 'idle', last: lastPull, error: '' });
     } catch (e) {
       setSyncState(s2 => ({ ...s2, status: 'error', error: String(e.message || e) }));
@@ -3551,7 +3797,7 @@ function RelationshipTracker() {
                   <span className="text-stone-500">No activity logged yet.</span>
                 ) : (
                   <span className={quiet >= 21 ? 'text-red-700' : quiet >= 7 ? 'text-amber-700' : 'text-stone-600'}>
-                    Last activity {quiet} day{quiet === 1 ? '' : 's'} ago.
+                    Last activity {formatGap(quiet)} ago.
                   </span>
                 )}
                 <p className="text-xs text-stone-400 mt-1.5">
@@ -3568,7 +3814,7 @@ function RelationshipTracker() {
           {looksOver(selected) && (
             <div className="bg-stone-100 border border-stone-300 rounded-lg p-3 mb-4 flex items-center justify-between gap-3">
               <p className="text-sm text-stone-700">
-                Nothing for {daysQuiet(selected)} days and nothing booked. Is this one over?
+                Nothing for {formatGap(daysQuiet(selected))} and nothing booked. Is this one over?
               </p>
               <button onClick={closeOutRelationship}
                 className="shrink-0 text-sm font-medium text-stone-800 border border-stone-400 rounded-md px-2.5 py-1 hover:bg-white">
@@ -3745,6 +3991,12 @@ function RelationshipTracker() {
           onCancel={() => setSyncConflict(null)}
         />
       )}
+      {showChangelog && (
+        <ChangelogModal
+          sinceVersion={showChangelog === 'all' ? null : showChangelog}
+          onClose={() => setShowChangelog(null)}
+        />
+      )}
       {notice && <NoticeToast message={notice} onClose={() => setNotice('')} />}
         {dateConfirm && (
           <ChatDateConfirmModal
@@ -3786,9 +4038,15 @@ function RelationshipTracker() {
             onLockChanged={() => setLockVersion(v => v + 1)}
             onRestoreMerge={(ppl) => restoreFromHistory(ppl, 'merge')}
             onRestoreReplace={(ppl) => restoreFromHistory(ppl, 'replace')}
-            onRestoreMerge={(ppl) => restoreFromHistory(ppl, 'merge')}
-            onRestoreReplace={(ppl) => restoreFromHistory(ppl, 'replace')}
+            onShowChangelog={() => setShowChangelog('all')}
+            onShowChangelog={() => setShowChangelog('all')}
             lockVersion={lockVersion}
+          />
+        )}
+        {showChangelog && (
+          <ChangelogModal
+            sinceVersion={showChangelog === 'all' ? null : showChangelog}
+            onClose={() => setShowChangelog(null)}
           />
         )}
         {error && <ErrorToast message={error} />}
@@ -3800,12 +4058,12 @@ function RelationshipTracker() {
   return (
     <div className="min-h-screen bg-stone-100 text-stone-900">
       <div className="max-w-2xl mx-auto px-4 py-8">
-        <header className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-2">
-            <Heart className="w-5 h-5 text-red-700" strokeWidth={1.75} />
-            <h1 className="text-2xl font-serif tracking-tight">Relationship Tracker</h1>
+        <header className="flex flex-wrap items-center justify-between gap-3 mb-6">
+          <div className="flex items-center gap-2 min-w-0">
+            <Heart className="w-5 h-5 text-red-700 shrink-0" strokeWidth={1.75} />
+            <h1 className="text-2xl font-serif tracking-tight truncate">Relationship Tracker</h1>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button onClick={() => setShowSettings(true)} className="p-2 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-stone-900" aria-label="Settings">
               <Settings className="w-4 h-4" />
             </button>
@@ -3954,7 +4212,7 @@ function RelationshipTracker() {
                     </div>
                     {quiet !== null && quiet >= 7 && !hasUpcoming && (
                       <div className={`mt-1 flex items-center gap-1 text-xs ${quiet >= 21 ? 'text-red-700' : 'text-amber-700'}`}>
-                        <MessageCircle className="w-3 h-3" />No contact logged in {quiet} days
+                        <MessageCircle className="w-3 h-3" />No contact logged in {formatGap(quiet)}
                       </div>
                     )}
                     {p.stage === 'Ended' && (() => {
@@ -4063,6 +4321,7 @@ function RelationshipTracker() {
           onLockChanged={() => setLockVersion(v => v + 1)}
           onRestoreMerge={(ppl) => restoreFromHistory(ppl, 'merge')}
           onRestoreReplace={(ppl) => restoreFromHistory(ppl, 'replace')}
+          onShowChangelog={() => setShowChangelog('all')}
           lockVersion={lockVersion}
         />
       )}
@@ -4096,14 +4355,14 @@ function StarPicker({ value, onChange }) {
 
 function ModalShell({ title, onCancel, onSave, children, saveLabel = 'Save' }) {
   return (
-    <div className="fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4 sm:flex sm:items-center sm:justify-center">
-      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 sm:mt-0 mb-8 sm:mb-0 mx-auto">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 bg-white rounded-t-lg">
+    <div className="fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4">
+      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 mb-8 mx-auto">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 z-50 bg-white rounded-t-lg">
           <h3 className="font-serif text-lg">{title}</h3>
           <button onClick={onCancel} className="p-1 text-stone-500 hover:text-stone-900"><X className="w-5 h-5" /></button>
         </div>
         <div className="p-4 pb-32 space-y-3">{children}</div>
-        <div className="flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 bg-white rounded-b-lg">
+        <div className="flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 z-50 bg-white rounded-b-lg">
           <button onClick={onCancel} className="flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">Cancel</button>
           <button onClick={onSave} className="flex-1 flex items-center justify-center gap-1.5 bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800">
             <Check className="w-4 h-4" /> {saveLabel}
@@ -4352,7 +4611,7 @@ function DuplicateNameModal({ info, onCancel, onOverwrite, onCreateNew }) {
   const stillDuplicate = normaliseMsg(newName) === normaliseMsg(match.name);
   return (
     <div className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-sm w-full p-4">
+      <div className="bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto">
         <div className="flex items-center gap-2 mb-2">
           <Flag className="w-4 h-4 text-amber-600" />
           <h3 className="font-serif text-lg">{match.name} already exists</h3>
@@ -4390,7 +4649,7 @@ function ChatDateConfirmModal({ info, onCancel, onConfirm }) {
   const markerText = (payload.markers || []).length ? payload.markers.join(', ') : 'no dated divider';
   return (
     <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-sm w-full p-4">
+      <div className="bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto">
         <div className="flex items-center gap-2 mb-2">
           <Calendar className="w-4 h-4 text-stone-600" />
           <h3 className="font-serif text-lg">Confirm the date</h3>
@@ -4415,7 +4674,7 @@ function ChatMismatchModal({ info, currentName, onCancel, onConfirm }) {
   const { payload, targetId, suggestion } = info;
   return (
     <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-sm w-full p-4">
+      <div className="bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto">
         <div className="flex items-center gap-2 mb-2">
           <Flag className="w-4 h-4 text-amber-600" />
           <h3 className="font-serif text-lg">Name doesn't match</h3>
@@ -5064,7 +5323,7 @@ function ConversationSection({ chronology, summary, onAddFiles, onDelete, onClea
                 {gap >= 3 && (
                   <div className="flex items-center gap-2 py-1">
                     <div className="flex-1 border-t border-dashed border-stone-200" />
-                    <span className="text-[10px] uppercase tracking-wide text-stone-400">{gap} days later</span>
+                    <span className="text-[10px] uppercase tracking-wide text-stone-400">{formatGap(gap)} later</span>
                     <div className="flex-1 border-t border-dashed border-stone-200" />
                   </div>
                 )}
@@ -5362,9 +5621,9 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
   }
 
   return (
-    <div className="fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4 sm:flex sm:items-center sm:justify-center">
-      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 sm:mt-0 mb-8 sm:mb-0 mx-auto">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 bg-white rounded-t-lg">
+    <div className="fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4">
+      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 mb-8 mx-auto">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 z-50 bg-white rounded-t-lg">
           <h3 className="font-serif text-lg">
             Import profile{queue.length > 1 ? ` (${qIndex + 1} of ${queue.length})` : ''}
           </h3>
@@ -5480,7 +5739,7 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
             </>
           )}
         </div>
-        <div className="flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 bg-white rounded-b-lg">
+        <div className="flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 z-50 bg-white rounded-b-lg">
           <button onClick={onCancel} className="flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">Cancel</button>
           {phase === 'review' && queue.length > 1 && qIndex < queue.length - 1 && (
             <button onClick={() => advance(qIndex)} className="flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
@@ -5576,9 +5835,9 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose }) {
   const selectCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
 
   return (
-    <div className="fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4 sm:flex sm:items-center sm:justify-center">
-      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 sm:mt-0 mb-8 sm:mb-0 mx-auto">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 bg-white rounded-t-lg">
+    <div className="fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4">
+      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 mb-8 mx-auto">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 z-50 bg-white rounded-t-lg">
           <h3 className="font-serif text-lg">
             Import chats{queue.length > 1 ? ` (${qIndex + 1} of ${queue.length})` : ''}
           </h3>
@@ -5674,7 +5933,7 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose }) {
           )}
         </div>
 
-        <div className="flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 bg-white rounded-b-lg">
+        <div className="flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 z-50 bg-white rounded-b-lg">
           <button onClick={() => onClose(results)} className="flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
             {phase === 'review' ? 'Stop' : 'Close'}
           </button>
@@ -5837,12 +6096,13 @@ function RestorePanel({ onMerge, onReplace }) {
 function SyncConflictModal({ info, onKeepLocal, onTakeRemote, onMerge, onCancel }) {
   return (
     <div className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-sm w-full p-4">
+      <div className="bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto">
         <h3 className="font-serif text-lg mb-2">Two copies differ</h3>
         <p className="text-sm text-stone-700">
           The synced copy has <strong>{info.remote.people.length} people</strong> and was last saved
           {info.remote.device ? ' from ' + info.remote.device : ''} on {new Date(info.remote.updatedAt).toLocaleString()}.
-          This device has <strong>{info.localCount}</strong>.
+          This device has <strong>{info.localCount}</strong>
+          {info.unpushed ? ', including changes that have not been uploaded yet' : ''}.
         </p>
         <button onClick={onMerge}
           className="mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800">
@@ -6029,7 +6289,7 @@ function InsightsModal({ people, onClose }) {
 
 // ---------- Settings (API key, export/import for backup or moving between devices) ----------
 
-function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync, onDisconnectSync, onSyncNow, onExported, onLockChanged, lockVersion, onRestoreMerge, onRestoreReplace }) {
+function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync, onDisconnectSync, onSyncNow, onExported, onLockChanged, lockVersion, onRestoreMerge, onRestoreReplace, onShowChangelog }) {
   const [apiKey, setApiKey] = useState(() => Local.get('anthropic-api-key') || '');
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -6049,7 +6309,7 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
   }
 
   function exportData() {
-    const blob = { exportedAt: new Date().toISOString(), people };
+    const blob = { exportedAt: new Date().toISOString(), version: APP_VERSION, build: BUILD_STAMP, people };
     const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(blob, null, 2));
     downloadDataUrl(dataUrl, 'relationship-tracker-backup.json');
     Local.set('rt:last-export', TODAY());
@@ -6090,9 +6350,9 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
   }
 
   return (
-    <div className="fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4 sm:flex sm:items-center sm:justify-center">
-      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 sm:mt-0 mb-8 sm:mb-0 mx-auto">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 bg-white rounded-t-lg">
+    <div className="fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4">
+      <div className="bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 mb-8 mx-auto">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 z-50 bg-white rounded-t-lg">
           <h3 className="font-serif text-lg">Settings</h3>
           <button onClick={onClose} className="p-1 text-stone-500 hover:text-stone-900"><X className="w-5 h-5" /></button>
         </div>
@@ -6179,7 +6439,10 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
                 </p>
               </div>
             )}
-            <p className="text-[11px] text-stone-400 mt-3">Build {BUILD_STAMP}</p>
+            <div className="mt-3 flex items-center justify-between gap-2">
+              <span className="text-[11px] text-stone-400">Version {APP_VERSION} · build {BUILD_STAMP}</span>
+              <button onClick={onShowChangelog} className="text-xs text-stone-600 underline">Version history</button>
+            </div>
             <LockPanel key={lockVersion} onChanged={onLockChanged} />
             <SyncPanel
               syncState={syncState}
@@ -6483,7 +6746,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-03 19:35';
+const BUILD_STAMP = '2026-08-04 18:25';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -6512,10 +6775,21 @@ const Sync = {
   markPulled(stamp) {
     Local.set('rt:last-pull', stamp || '');
   },
+  // Set whenever this device changes something, cleared once it reaches the Gist.
+  markDirty() {
+    Local.set('rt:unpushed', '1');
+  },
+  clearDirty() {
+    Local.remove('rt:unpushed');
+  },
+  isDirty() {
+    return Local.get('rt:unpushed') === '1';
+  },
   clear() {
     Local.remove('rt:gh-token');
     Local.remove('rt:gist-id');
     Local.remove('rt:last-pull');
+    Local.remove('rt:unpushed');
   }
 };
 async function ghFetch(path, options) {
@@ -6795,6 +7069,20 @@ function briefNextStep(read) {
   if (!read || !read.recommendation) return '';
   const first = read.recommendation.split(/(?<=[.!?])\s+/)[0] || read.recommendation;
   return first.length > 120 ? first.slice(0, 117).trimEnd() + '…' : first;
+}
+
+// Past three months, a day count stops meaning anything. Months round down, so
+// 115 days is three months, not "nearly four".
+function formatGap(days) {
+  if (days === null || days === undefined) return '';
+  if (days < 90) return days + (days === 1 ? ' day' : ' days');
+  // Count whole years off first, or 365 days reads as "11 months".
+  const years = Math.floor(days / 365);
+  const rem = Math.floor((days - years * 365) / 30.44);
+  const months = Math.floor(days / 30.44);
+  if (!years) return months + ' months';
+  const yPart = years + (years === 1 ? ' year' : ' years');
+  return rem ? yPart + ' ' + rem + (rem === 1 ? ' month' : ' months') : yPart;
 }
 function daysQuiet(person) {
   const last = lastActivity(person);
@@ -8601,7 +8889,7 @@ function buildCoachContext(person, brief) {
   const missing = datesMissingDebrief(person);
   if (missing.length) lines.push(missing.length + ' completed date(s) have no write-up from you.');
   const quiet = daysQuiet(person);
-  if (quiet !== null) lines.push('Days since last logged activity: ' + quiet);
+  if (quiet !== null) lines.push('Time since the last logged activity: ' + formatGap(quiet) + ' (' + quiet + ' days).');
   const next = (person.dates || []).find(d => d.status === 'Upcoming' && d.date >= TODAY());
   if (next) lines.push('Date already booked: ' + next.date + ' at ' + (next.location || 'venue TBC'));
   lines.push('Today is ' + TODAY() + '.');
@@ -9080,6 +9368,153 @@ function LockPanel({
   }, err));
 }
 
+// ---------- Version ----------
+// Semantic versioning: MAJOR.MINOR.PATCH. MAJOR for breaking changes to the data
+// shape, MINOR for new features, PATCH for fixes. The build stamp below is the
+// compile time, used to confirm which build a device is actually running.
+
+const APP_VERSION = '1.1.1';
+
+// Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
+// removed / security. Versions before 1.1.0 were reconstructed from the
+// development history, so their dates are approximate.
+const CHANGELOG = [{
+  version: '1.1.1',
+  date: '2026-08-03',
+  changes: [['fixed', 'Top of tall dialogs was unreachable on desktop — Settings, the API key field and other forms now scroll fully'], ['fixed', 'Sticky headers and footers in dialogs sat under the content they should cover']]
+}, {
+  version: '1.1.0',
+  date: '2026-08-03',
+  changes: [['added', 'Version numbering and this changelog, reachable from Settings'], ['added', "What's new shown once after an update"]]
+}, {
+  version: '1.0.1',
+  date: '2026-08-03',
+  changes: [['fixed', 'Add person button pushed off screen on mobile — the header now wraps'], ['changed', 'Gaps over 90 days read as months and years, rounded down, instead of a day count'], ['fixed', 'Duplicated props on the Settings mount']]
+}, {
+  version: '1.0.0',
+  date: '2026-08-03',
+  changes: [['added', '"Where you stand": your intention, your own interest level, attraction, logistics and dealbreakers'], ['added', 'Red flags called out by the coach, graded note / watch / serious'], ['added', 'Interest gap between your level and hers'], ['added', 'Merge on import — combine two devices instead of replacing one'], ['added', 'Restore from Gist revision history in Settings'], ['changed', 'Coaching now follows your stated intention rather than assuming a long-term goal'], ['changed', 'Lighter, drier coaching tone'], ['fixed', 'Records without an ID could merge into the wrong person'], ['fixed', 'Sync conflict dialog had no way to cancel; now offers combine and decide-later'], ['fixed', 'Startup no longer overwrites unpushed local changes silently']]
+}, {
+  version: '0.14.0',
+  date: '2026-08-03',
+  changes: [['changed', 'Long screenshots read in sections of four panels, two at a time'], ['changed', 'Panels encoded one at a time — memory stays flat however long the image'], ['added', 'Two-minute request timeout with one automatic retry'], ['added', 'The coach read degrades through three stages rather than failing'], ['fixed', 'Chunked retry discarded everything, so long chats always failed'], ['fixed', 'Truncated replies are repaired at any nesting depth'], ['added', 'Screenshot dimensions checked before spending a read']]
+}, {
+  version: '0.13.0',
+  date: '2026-08-03',
+  changes: [['added', 'App lock with a passcode and device biometrics'], ['added', 'Re-locks after five minutes in the background']]
+}, {
+  version: '0.12.0',
+  date: '2026-08-03',
+  changes: [['added', 'Relationship period by month, with span in years and months'], ['added', 'Automatic classification: talking only through to long-term relationship'], ['added', 'Closure state graded by how long ago it ended'], ['added', 'Retrospective coaching for relationships that are over']]
+}, {
+  version: '0.11.0',
+  date: '2026-08-03',
+  changes: [['added', 'Dates and chat on one timeline'], ['added', 'Post-date write-up treated as the only record of a date'], ['added', 'Contact log for calls and meetings with no screenshot'], ['added', 'Proposed status for dates that never happened']]
+}, {
+  version: '0.10.0',
+  date: '2026-08-02',
+  changes: [['added', "Doc Love's interest level, with a speedometer gauge"], ['changed', 'All coaching written in the second person'], ['added', 'Match date inferred from the first message']]
+}, {
+  version: '0.9.0',
+  date: '2026-08-02',
+  changes: [['added', 'Cross-device sync through a private GitHub Gist'], ['added', 'Backup reminders and recovery guidance']]
+}, {
+  version: '0.8.0',
+  date: '2026-08-02',
+  changes: [['changed', 'Self-contained build — React inlined, JSX precompiled, no CDN'], ['added', 'Crash guard so a render error shows a message instead of a blank screen']]
+}, {
+  version: '0.7.0',
+  date: '2026-08-02',
+  changes: [['added', 'Bulk chat import from the home screen, filed to existing or new people']]
+}, {
+  version: '0.6.0',
+  date: '2026-08-02',
+  changes: [['added', '"Where this stands" coaching read with vibe and next move'], ['added', 'Dates spotted in chat offered as confirmable suggestions']]
+}, {
+  version: '0.5.0',
+  date: '2026-08-02',
+  changes: [['changed', 'Chat summarised by day rather than transcribed'], ['added', 'Date confirmation when a chat shows only relative day dividers']]
+}, {
+  version: '0.4.0',
+  date: '2026-08-01',
+  changes: [['added', 'Chronological conversation timeline with duplicate detection'], ['added', 'Warning when a chat name does not match the person'], ['added', 'Several profiles imported in one go']]
+}, {
+  version: '0.3.0',
+  date: '2026-08-01',
+  changes: [['added', 'Structured profile extraction across 23 labelled fields'], ['added', 'Tall screenshots sliced into panels so text stays readable'], ['added', 'Photos cropped from profile screenshots']]
+}, {
+  version: '0.2.0',
+  date: '2026-08-01',
+  changes: [['added', 'Storage adapter so the app works outside the artifact frame'], ['added', 'Upcoming dates, search, stage filters and Insights']]
+}, {
+  version: '0.1.0',
+  date: '2026-08-01',
+  changes: [['added', 'People, stages, dates, ratings, photos, notes, export and import']]
+}];
+const CHANGE_COLOURS = {
+  added: 'bg-emerald-50 text-emerald-800',
+  changed: 'bg-sky-50 text-sky-800',
+  fixed: 'bg-amber-50 text-amber-800',
+  removed: 'bg-stone-100 text-stone-600',
+  security: 'bg-violet-50 text-violet-800'
+};
+
+// Simple semver comparison, newest first.
+function versionIsNewer(a, b) {
+  const pa = String(a || '0.0.0').split('.').map(Number);
+  const pb = String(b || '0.0.0').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+  }
+  return false;
+}
+function ChangelogModal({
+  onClose,
+  sinceVersion
+}) {
+  const unseen = sinceVersion ? CHANGELOG.filter(e => versionIsNewer(e.version, sinceVersion)) : [];
+  const showing = unseen.length ? unseen : CHANGELOG;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 bg-black/60 z-[70] flex items-end sm:items-center justify-center p-0 sm:p-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-lg max-h-[85vh] overflow-y-auto"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sticky top-0 bg-white border-b border-stone-200 px-4 py-3 flex items-center justify-between"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h3", {
+    className: "font-serif text-lg"
+  }, unseen.length ? "What's new" : 'Version history'), /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-stone-400"
+  }, "Currently on ", APP_VERSION)), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    className: "p-1.5 text-stone-500 hover:text-stone-900"
+  }, /*#__PURE__*/React.createElement(X, {
+    className: "w-4 h-4"
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "p-4 space-y-5"
+  }, showing.map(entry => /*#__PURE__*/React.createElement("div", {
+    key: entry.version
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-baseline gap-2 mb-1.5"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-sm font-semibold text-stone-900"
+  }, entry.version), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-stone-400"
+  }, entry.date), entry.version === APP_VERSION && /*#__PURE__*/React.createElement("span", {
+    className: "text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5"
+  }, "current")), /*#__PURE__*/React.createElement("ul", {
+    className: "space-y-1"
+  }, entry.changes.map(([type, text], i) => /*#__PURE__*/React.createElement("li", {
+    key: i,
+    className: "flex items-start gap-2"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: `text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5 shrink-0 mt-0.5 ${CHANGE_COLOURS[type] || CHANGE_COLOURS.removed}`
+  }, type), /*#__PURE__*/React.createElement("span", {
+    className: "text-sm text-stone-700"
+  }, text)))))), /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-stone-400 border-t border-stone-100 pt-3"
+  }, "Versions before 1.1.0 were reconstructed from the development history, so their dates are approximate. Build ", BUILD_STAMP, "."))));
+}
+
 // ---------- Crash guard ----------
 // A thrown render error would otherwise leave a blank white screen with no clue
 // what happened. Catch it, show it, and let the app be restarted without losing
@@ -9152,6 +9587,7 @@ function RelationshipTracker() {
   const [locked, setLocked] = useState(() => Lock.enabled());
   const hiddenAt = React.useRef(null);
   const [lockVersion, setLockVersion] = useState(0);
+  const [showChangelog, setShowChangelog] = useState(null); // 'all' | a version string
   const [syncState, setSyncState] = useState({
     status: Sync.configured() ? 'idle' : 'off',
     last: Sync.lastPull(),
@@ -9169,6 +9605,13 @@ function RelationshipTracker() {
     load().then(() => {
       if (Sync.configured()) pullFromCloud(true);
     });
+  }, []);
+
+  // Show what changed the first time a device runs a new version.
+  useEffect(() => {
+    const seen = Local.get('rt:seen-version');
+    if (seen && versionIsNewer(APP_VERSION, seen)) setShowChangelog(seen);
+    Local.set('rt:seen-version', APP_VERSION);
   }, []);
 
   // Re-lock after five minutes in the background, not on every glance away.
@@ -9222,6 +9665,7 @@ function RelationshipTracker() {
   // Push a few seconds after the last change, so a burst of edits is one upload.
   function schedulePush(next) {
     if (!Sync.configured() || !Sync.gistId()) return;
+    Sync.markDirty();
     if (pushTimer.current) clearTimeout(pushTimer.current);
     pushTimer.current = setTimeout(() => {
       pushToCloud(next);
@@ -9236,6 +9680,7 @@ function RelationshipTracker() {
     }));
     try {
       const stamp = await ghPush(next || peopleRef.current);
+      Sync.clearDirty();
       setSyncState({
         status: 'idle',
         last: stamp,
@@ -9266,35 +9711,48 @@ function RelationshipTracker() {
           last: Sync.lastPull(),
           error: ''
         });
+        if (!atStartup) setNotice('Nothing stored in sync yet.');
         return;
       }
       const localCount = peopleRef.current.length;
       const lastPull = Sync.lastPull();
       const remoteIsNewer = remote.updatedAt && (!lastPull || remote.updatedAt > lastPull);
       if (!remoteIsNewer) {
-        // Nothing new up there — make sure our copy is the one on record.
-        if (localCount) await pushToCloud(peopleRef.current);else setSyncState({
-          status: 'idle',
-          last: lastPull,
-          error: ''
-        });
+        if (localCount) {
+          await pushToCloud(peopleRef.current);
+          // Say so — silence here reads as "the button did nothing".
+          if (!atStartup) setNotice('Already up to date. Uploaded this device\'s copy — ' + localCount + ' people.');
+        } else {
+          setSyncState({
+            status: 'idle',
+            last: lastPull,
+            error: ''
+          });
+          if (!atStartup) setNotice('Nothing here to upload, and nothing newer in sync.');
+        }
         return;
       }
-      if (atStartup || !localCount) {
+
+      // Remote is newer. Only take it outright when this device has nothing of
+      // its own at stake.
+      const safeToReplace = !localCount || atStartup && !Sync.isDirty();
+      if (safeToReplace) {
         setPeople(remote.people);
         await DataStore.set('people-list', JSON.stringify(remote.people));
         Sync.markPulled(remote.updatedAt);
+        Sync.clearDirty();
         setSyncState({
           status: 'idle',
           last: remote.updatedAt,
           error: ''
         });
-        if (!atStartup) setNotice('Pulled ' + remote.people.length + ' people from sync.');
+        setNotice('Downloaded the newer copy — ' + remote.people.length + ' people.');
         return;
       }
       setSyncConflict({
         remote,
-        localCount
+        localCount,
+        unpushed: Sync.isDirty()
       });
       setSyncState({
         status: 'idle',
@@ -10008,7 +10466,7 @@ function RelationshipTracker() {
         className: "text-stone-500"
       }, "No activity logged yet.") : /*#__PURE__*/React.createElement("span", {
         className: quiet >= 21 ? 'text-red-700' : quiet >= 7 ? 'text-amber-700' : 'text-stone-600'
-      }, "Last activity ", quiet, " day", quiet === 1 ? '' : 's', " ago."), /*#__PURE__*/React.createElement("p", {
+      }, "Last activity ", formatGap(quiet), " ago."), /*#__PURE__*/React.createElement("p", {
         className: "text-xs text-stone-400 mt-1.5"
       }, "Spoke by phone, or saw her, with no chat to import?", ' ', /*#__PURE__*/React.createElement("button", {
         onClick: () => setContactNote({}),
@@ -10018,7 +10476,7 @@ function RelationshipTracker() {
       className: "bg-stone-100 border border-stone-300 rounded-lg p-3 mb-4 flex items-center justify-between gap-3"
     }, /*#__PURE__*/React.createElement("p", {
       className: "text-sm text-stone-700"
-    }, "Nothing for ", daysQuiet(selected), " days and nothing booked. Is this one over?"), /*#__PURE__*/React.createElement("button", {
+    }, "Nothing for ", formatGap(daysQuiet(selected)), " and nothing booked. Is this one over?"), /*#__PURE__*/React.createElement("button", {
       onClick: closeOutRelationship,
       className: "shrink-0 text-sm font-medium text-stone-800 border border-stone-400 rounded-md px-2.5 py-1 hover:bg-white"
     }, "Close it out")), /*#__PURE__*/React.createElement(StatusPanel, {
@@ -10170,6 +10628,9 @@ function RelationshipTracker() {
       onTakeRemote: () => resolveConflict('remote'),
       onMerge: () => resolveConflict('merge'),
       onCancel: () => setSyncConflict(null)
+    }), showChangelog && /*#__PURE__*/React.createElement(ChangelogModal, {
+      sinceVersion: showChangelog === 'all' ? null : showChangelog,
+      onClose: () => setShowChangelog(null)
     }), notice && /*#__PURE__*/React.createElement(NoticeToast, {
       message: notice,
       onClose: () => setNotice('')
@@ -10212,9 +10673,12 @@ function RelationshipTracker() {
       onLockChanged: () => setLockVersion(v => v + 1),
       onRestoreMerge: ppl => restoreFromHistory(ppl, 'merge'),
       onRestoreReplace: ppl => restoreFromHistory(ppl, 'replace'),
-      onRestoreMerge: ppl => restoreFromHistory(ppl, 'merge'),
-      onRestoreReplace: ppl => restoreFromHistory(ppl, 'replace'),
+      onShowChangelog: () => setShowChangelog('all'),
+      onShowChangelog: () => setShowChangelog('all'),
       lockVersion: lockVersion
+    }), showChangelog && /*#__PURE__*/React.createElement(ChangelogModal, {
+      sinceVersion: showChangelog === 'all' ? null : showChangelog,
+      onClose: () => setShowChangelog(null)
     }), error && /*#__PURE__*/React.createElement(ErrorToast, {
       message: error
     }));
@@ -10226,16 +10690,16 @@ function RelationshipTracker() {
   }, /*#__PURE__*/React.createElement("div", {
     className: "max-w-2xl mx-auto px-4 py-8"
   }, /*#__PURE__*/React.createElement("header", {
-    className: "flex items-center justify-between mb-6"
+    className: "flex flex-wrap items-center justify-between gap-3 mb-6"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-2"
+    className: "flex items-center gap-2 min-w-0"
   }, /*#__PURE__*/React.createElement(Heart, {
-    className: "w-5 h-5 text-red-700",
+    className: "w-5 h-5 text-red-700 shrink-0",
     strokeWidth: 1.75
   }), /*#__PURE__*/React.createElement("h1", {
-    className: "text-2xl font-serif tracking-tight"
+    className: "text-2xl font-serif tracking-tight truncate"
   }, "Relationship Tracker")), /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-2"
+    className: "flex items-center gap-2 flex-wrap"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowSettings(true),
     className: "p-2 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-stone-900",
@@ -10389,7 +10853,7 @@ function RelationshipTracker() {
       className: `mt-1 flex items-center gap-1 text-xs ${quiet >= 21 ? 'text-red-700' : 'text-amber-700'}`
     }, /*#__PURE__*/React.createElement(MessageCircle, {
       className: "w-3 h-3"
-    }), "No contact logged in ", quiet, " days"), p.stage === 'Ended' && (() => {
+    }), "No contact logged in ", formatGap(quiet)), p.stage === 'Ended' && (() => {
       const span = relSpanMonths(p);
       const closure = closureState(p);
       return /*#__PURE__*/React.createElement("div", {
@@ -10462,6 +10926,7 @@ function RelationshipTracker() {
     onLockChanged: () => setLockVersion(v => v + 1),
     onRestoreMerge: ppl => restoreFromHistory(ppl, 'merge'),
     onRestoreReplace: ppl => restoreFromHistory(ppl, 'replace'),
+    onShowChangelog: () => setShowChangelog('all'),
     lockVersion: lockVersion
   }));
 }
@@ -10505,11 +10970,11 @@ function ModalShell({
   saveLabel = 'Save'
 }) {
   return /*#__PURE__*/React.createElement("div", {
-    className: "fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4 sm:flex sm:items-center sm:justify-center"
+    className: "fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 sm:mt-0 mb-8 sm:mb-0 mx-auto"
+    className: "bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 mb-8 mx-auto"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 bg-white rounded-t-lg"
+    className: "flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 z-50 bg-white rounded-t-lg"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "font-serif text-lg"
   }, title), /*#__PURE__*/React.createElement("button", {
@@ -10520,7 +10985,7 @@ function ModalShell({
   }))), /*#__PURE__*/React.createElement("div", {
     className: "p-4 pb-32 space-y-3"
   }, children), /*#__PURE__*/React.createElement("div", {
-    className: "flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 bg-white rounded-b-lg"
+    className: "flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 z-50 bg-white rounded-b-lg"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: onCancel,
     className: "flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
@@ -10946,7 +11411,7 @@ function DuplicateNameModal({
   return /*#__PURE__*/React.createElement("div", {
     className: "fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "bg-white rounded-lg max-w-sm w-full p-4"
+    className: "bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-2 mb-2"
   }, /*#__PURE__*/React.createElement(Flag, {
@@ -10993,7 +11458,7 @@ function ChatDateConfirmModal({
   return /*#__PURE__*/React.createElement("div", {
     className: "fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "bg-white rounded-lg max-w-sm w-full p-4"
+    className: "bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-2 mb-2"
   }, /*#__PURE__*/React.createElement(Calendar, {
@@ -11033,7 +11498,7 @@ function ChatMismatchModal({
   return /*#__PURE__*/React.createElement("div", {
     className: "fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "bg-white rounded-lg max-w-sm w-full p-4"
+    className: "bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-2 mb-2"
   }, /*#__PURE__*/React.createElement(Flag, {
@@ -11869,7 +12334,7 @@ function ConversationSection({
       className: "flex-1 border-t border-dashed border-stone-200"
     }), /*#__PURE__*/React.createElement("span", {
       className: "text-[10px] uppercase tracking-wide text-stone-400"
-    }, gap, " days later"), /*#__PURE__*/React.createElement("div", {
+    }, formatGap(gap), " later"), /*#__PURE__*/React.createElement("div", {
       className: "flex-1 border-t border-dashed border-stone-200"
     })), item.kind === 'contact' ? /*#__PURE__*/React.createElement(ContactTimelineCard, {
       entry: item.entry,
@@ -12195,11 +12660,11 @@ function ProfileImportModal({
     if (more) advance(qIndex);else if (overwriteId) onCancel();
   }
   return /*#__PURE__*/React.createElement("div", {
-    className: "fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4 sm:flex sm:items-center sm:justify-center"
+    className: "fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 sm:mt-0 mb-8 sm:mb-0 mx-auto"
+    className: "bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 mb-8 mx-auto"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 bg-white rounded-t-lg"
+    className: "flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 z-50 bg-white rounded-t-lg"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "font-serif text-lg"
   }, "Import profile", queue.length > 1 ? ` (${qIndex + 1} of ${queue.length})` : ''), /*#__PURE__*/React.createElement("button", {
@@ -12374,7 +12839,7 @@ function ProfileImportModal({
     rows: 5,
     className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
   })))), /*#__PURE__*/React.createElement("div", {
-    className: "flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 bg-white rounded-b-lg"
+    className: "flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 z-50 bg-white rounded-b-lg"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: onCancel,
     className: "flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
@@ -12474,11 +12939,11 @@ function ChatImportModal({
   }
   const selectCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
   return /*#__PURE__*/React.createElement("div", {
-    className: "fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4 sm:flex sm:items-center sm:justify-center"
+    className: "fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 sm:mt-0 mb-8 sm:mb-0 mx-auto"
+    className: "bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 mb-8 mx-auto"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 bg-white rounded-t-lg"
+    className: "flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 z-50 bg-white rounded-t-lg"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "font-serif text-lg"
   }, "Import chats", queue.length > 1 ? ` (${qIndex + 1} of ${queue.length})` : ''), /*#__PURE__*/React.createElement("button", {
@@ -12564,7 +13029,7 @@ function ChatImportModal({
   })), results.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-stone-400 border-t border-stone-100 pt-2"
   }, "Done so far: ", results.join(' · ')))), /*#__PURE__*/React.createElement("div", {
-    className: "flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 bg-white rounded-b-lg"
+    className: "flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 z-50 bg-white rounded-b-lg"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => onClose(results),
     className: "flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
@@ -12728,12 +13193,12 @@ function SyncConflictModal({
   return /*#__PURE__*/React.createElement("div", {
     className: "fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "bg-white rounded-lg max-w-sm w-full p-4"
+    className: "bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "font-serif text-lg mb-2"
   }, "Two copies differ"), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-700"
-  }, "The synced copy has ", /*#__PURE__*/React.createElement("strong", null, info.remote.people.length, " people"), " and was last saved", info.remote.device ? ' from ' + info.remote.device : '', " on ", new Date(info.remote.updatedAt).toLocaleString(), ". This device has ", /*#__PURE__*/React.createElement("strong", null, info.localCount), "."), /*#__PURE__*/React.createElement("button", {
+  }, "The synced copy has ", /*#__PURE__*/React.createElement("strong", null, info.remote.people.length, " people"), " and was last saved", info.remote.device ? ' from ' + info.remote.device : '', " on ", new Date(info.remote.updatedAt).toLocaleString(), ". This device has ", /*#__PURE__*/React.createElement("strong", null, info.localCount), info.unpushed ? ', including changes that have not been uploaded yet' : '', "."), /*#__PURE__*/React.createElement("button", {
     onClick: onMerge,
     className: "mt-3 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800"
   }, "Combine both — keep everything"), /*#__PURE__*/React.createElement("p", {
@@ -12951,7 +13416,8 @@ function SettingsModal({
   onLockChanged,
   lockVersion,
   onRestoreMerge,
-  onRestoreReplace
+  onRestoreReplace,
+  onShowChangelog
 }) {
   const [apiKey, setApiKey] = useState(() => Local.get('anthropic-api-key') || '');
   const [showKey, setShowKey] = useState(false);
@@ -12971,6 +13437,8 @@ function SettingsModal({
   function exportData() {
     const blob = {
       exportedAt: new Date().toISOString(),
+      version: APP_VERSION,
+      build: BUILD_STAMP,
       people
     };
     const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(blob, null, 2));
@@ -13013,11 +13481,11 @@ function SettingsModal({
     setPending(null);
   }
   return /*#__PURE__*/React.createElement("div", {
-    className: "fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4 sm:flex sm:items-center sm:justify-center"
+    className: "fixed inset-0 bg-black/70 z-50 overflow-y-auto p-0 sm:p-4"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 sm:mt-0 mb-8 sm:mb-0 mx-auto"
+    className: "bg-white w-full sm:max-w-md sm:rounded-lg rounded-t-lg shadow-2xl mt-8 mb-8 mx-auto"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 bg-white rounded-t-lg"
+    className: "flex items-center justify-between px-4 py-3 border-b border-stone-200 sticky top-0 z-50 bg-white rounded-t-lg"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "font-serif text-lg"
   }, "Settings"), /*#__PURE__*/React.createElement("button", {
@@ -13102,9 +13570,14 @@ function SettingsModal({
     className: "w-full text-sm text-stone-500 py-2"
   }, "Cancel"), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-stone-400 mt-1"
-  }, "Merging never deletes: dates, messages, photos and notes from both copies are kept, and where the same thing exists twice the more recently touched copy wins.")), /*#__PURE__*/React.createElement("p", {
-    className: "text-[11px] text-stone-400 mt-3"
-  }, "Build ", BUILD_STAMP), /*#__PURE__*/React.createElement(LockPanel, {
+  }, "Merging never deletes: dates, messages, photos and notes from both copies are kept, and where the same thing exists twice the more recently touched copy wins.")), /*#__PURE__*/React.createElement("div", {
+    className: "mt-3 flex items-center justify-between gap-2"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-[11px] text-stone-400"
+  }, "Version ", APP_VERSION, " · build ", BUILD_STAMP), /*#__PURE__*/React.createElement("button", {
+    onClick: onShowChangelog,
+    className: "text-xs text-stone-600 underline"
+  }, "Version history")), /*#__PURE__*/React.createElement(LockPanel, {
     key: lockVersion,
     onChanged: onLockChanged
   }), /*#__PURE__*/React.createElement(SyncPanel, {
