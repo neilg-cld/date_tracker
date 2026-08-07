@@ -3175,12 +3175,18 @@ function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickMa
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.8.2';
+const APP_VERSION = '1.8.3';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '1.8.3', date: '2026-08-07', changes: [
+      ['fixed', 'Sharing an image showed the lock message but nothing after unlocking — the dialog was only mounted on the person page, never the home screen'],
+      ['changed', 'App-wide dialogs are now defined once and shown on every screen, so none can go missing again'],
+    ],
+  },
   {
     version: '1.8.2', date: '2026-08-07', changes: [
       ['fixed', 'Sharing a screenshot opened the app but appeared to do nothing — the shared file was written to a path the page did not look in'],
@@ -4265,6 +4271,94 @@ function RelationshipTracker() {
   }, [people]);
 
   // ---------- Detail (single person) view ----------
+  // Dialogs that belong to the app rather than to one screen. Defined once and
+  // rendered by both views — mounting them in only one is exactly how a shared
+  // image could arrive and never be shown.
+  const globalDialogs = (
+    <React.Fragment>
+      {shared && (
+        <SharedImageModal
+          state={shared}
+          people={people}
+          onCancel={() => setShared(null)}
+          onPickManually={() => { setShared(null); setShowChatImport(true); }}
+          onProfile={() => { setPendingImportFiles({ kind: 'profile', files: shared.files }); setShared(null); setShowProfileImport(true); }}
+          onChat={() => { setPendingImportFiles({ kind: 'chat', files: shared.files }); setShared(null); setShowChatImport(true); }}
+        />
+      )}
+      {syncConflict && (
+        <SyncConflictModal
+          info={syncConflict}
+          onKeepLocal={() => resolveConflict('local')}
+          onTakeRemote={() => resolveConflict('remote')}
+          onMerge={() => resolveConflict('merge')}
+          onCancel={() => setSyncConflict(null)}
+        />
+      )}
+      {confirmAction && (
+        <ConfirmModal
+          title={confirmAction.title}
+          body={confirmAction.body}
+          detail={confirmAction.detail}
+          confirmLabel={confirmAction.confirmLabel}
+          onCancel={() => setConfirmAction(null)}
+          onConfirm={async () => { const run = confirmAction.run; setConfirmAction(null); await run(); }}
+        />
+      )}
+      {showChangelog && (
+        <ChangelogModal
+          sinceVersion={showChangelog === 'all' ? null : showChangelog}
+          onClose={() => setShowChangelog(null)}
+        />
+      )}
+      {showProfileImport && (
+        <ProfileImportModal
+          initialFiles={pendingImportFiles && pendingImportFiles.kind === 'profile' ? pendingImportFiles.files : null}
+          onConsumedFiles={() => setPendingImportFiles(null)}
+          onCancel={() => setShowProfileImport(false)}
+          onCreate={handleCreateFromImport}
+          onOverwrite={handleOverwriteFromImport}
+          existingPeople={people}
+          knownChannels={knownChannels}
+        />
+      )}
+      {showChatImport && (
+        <ChatImportModal
+          initialFiles={pendingImportFiles && pendingImportFiles.kind === 'chat' ? pendingImportFiles.files : null}
+          onConsumedFiles={() => setPendingImportFiles(null)}
+          people={people}
+          onCommit={(payload, targetId, date) => commitConversation(payload, targetId, date)}
+          onCreatePerson={createPersonForChat}
+          onClose={(results) => {
+            setShowChatImport(false);
+            if (results && results.length) setNotice(results.length + ' chat' + (results.length === 1 ? '' : 's') + ' imported.');
+          }}
+        />
+      )}
+      {showInsights && (
+        <InsightsModal people={people} onClose={() => setShowInsights(false)} />
+      )}
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          people={people}
+          onImportData={async (imported) => { await persist(imported); }}
+          syncState={syncState}
+          onConnectSync={connectSync}
+          onDisconnectSync={disconnectSync}
+          onSyncNow={() => pullFromCloud(false)}
+          onExported={(d) => { setExportStamp(d); setBackupNag(false); }}
+          onLockChanged={() => setLockVersion(v => v + 1)}
+          onRestoreMerge={(ppl) => restoreFromHistory(ppl, 'merge')}
+          onRestoreReplace={(ppl) => restoreFromHistory(ppl, 'replace')}
+          onShowChangelog={() => setShowChangelog('all')}
+          lockVersion={lockVersion}
+        />
+      )}
+      {notice && <NoticeToast message={notice} onClose={() => setNotice('')} />}
+    </React.Fragment>
+  );
+
   if (locked) {
     return (
       <>
@@ -4604,15 +4698,6 @@ function RelationshipTracker() {
           />
         )}
         {lightbox && <Lightbox photo={lightbox} onClose={() => setLightbox(null)} />}
-        {syncConflict && (
-        <SyncConflictModal
-          info={syncConflict}
-          onKeepLocal={() => resolveConflict('local')}
-          onTakeRemote={() => resolveConflict('remote')}
-          onMerge={() => resolveConflict('merge')}
-          onCancel={() => setSyncConflict(null)}
-        />
-      )}
       {confirmAction && (
         <ConfirmModal
           title={confirmAction.title}
@@ -4623,23 +4708,6 @@ function RelationshipTracker() {
           onConfirm={async () => { const run = confirmAction.run; setConfirmAction(null); await run(); }}
         />
       )}
-      {shared && (
-        <SharedImageModal
-          state={shared}
-          people={people}
-          onCancel={() => setShared(null)}
-          onPickManually={() => { setShared(null); setShowChatImport(true); }}
-          onProfile={() => { setPendingImportFiles({ kind: 'profile', files: shared.files }); setShared(null); setShowProfileImport(true); }}
-          onChat={() => { setPendingImportFiles({ kind: 'chat', files: shared.files }); setShared(null); setShowChatImport(true); }}
-        />
-      )}
-      {showChangelog && (
-        <ChangelogModal
-          sinceVersion={showChangelog === 'all' ? null : showChangelog}
-          onClose={() => setShowChangelog(null)}
-        />
-      )}
-      {notice && <NoticeToast message={notice} onClose={() => setNotice('')} />}
         {dateConfirm && (
           <ChatDateConfirmModal
             info={dateConfirm}
@@ -4688,22 +4756,13 @@ function RelationshipTracker() {
             lockVersion={lockVersion}
           />
         )}
-        {confirmAction && (
-          <ConfirmModal
-            title={confirmAction.title}
-            body={confirmAction.body}
-            detail={confirmAction.detail}
-            confirmLabel={confirmAction.confirmLabel}
-            onCancel={() => setConfirmAction(null)}
-            onConfirm={async () => { const run = confirmAction.run; setConfirmAction(null); await run(); }}
-          />
-        )}
         {showChangelog && (
           <ChangelogModal
             sinceVersion={showChangelog === 'all' ? null : showChangelog}
             onClose={() => setShowChangelog(null)}
           />
         )}
+        {globalDialogs}
         {error && <ErrorToast message={error} />}
       </div>
     );
@@ -4947,51 +5006,7 @@ function RelationshipTracker() {
           onCancel={cancelPersonForm} onSave={savePersonForm} knownChannels={knownChannels}
         />
       )}
-      {showProfileImport && (
-        <ProfileImportModal
-          initialFiles={pendingImportFiles && pendingImportFiles.kind === 'profile' ? pendingImportFiles.files : null}
-          onConsumedFiles={() => setPendingImportFiles(null)}
-          onCancel={() => setShowProfileImport(false)}
-          onCreate={handleCreateFromImport}
-          onOverwrite={handleOverwriteFromImport}
-          existingPeople={people}
-          knownChannels={knownChannels}
-        />
-      )}
-      {showChatImport && (
-        <ChatImportModal
-          initialFiles={pendingImportFiles && pendingImportFiles.kind === 'chat' ? pendingImportFiles.files : null}
-          onConsumedFiles={() => setPendingImportFiles(null)}
-          people={people}
-          onCommit={(payload, targetId, date) => commitConversation(payload, targetId, date)}
-          onCreatePerson={createPersonForChat}
-          onClose={(results) => {
-            setShowChatImport(false);
-            if (results && results.length) setNotice(results.length + ' chat' + (results.length === 1 ? '' : 's') + ' imported.');
-          }}
-        />
-      )}
-      {notice && <NoticeToast message={notice} onClose={() => setNotice('')} />}
-      {showInsights && (
-        <InsightsModal people={people} onClose={() => setShowInsights(false)} />
-      )}
-      {showSettings && (
-        <SettingsModal
-          onClose={() => setShowSettings(false)}
-          people={people}
-          onImportData={async (imported) => { await persist(imported); }}
-          syncState={syncState}
-          onConnectSync={connectSync}
-          onDisconnectSync={disconnectSync}
-          onSyncNow={() => pullFromCloud(false)}
-          onExported={(d) => { setExportStamp(d); setBackupNag(false); }}
-          onLockChanged={() => setLockVersion(v => v + 1)}
-          onRestoreMerge={(ppl) => restoreFromHistory(ppl, 'merge')}
-          onRestoreReplace={(ppl) => restoreFromHistory(ppl, 'replace')}
-          onShowChangelog={() => setShowChangelog('all')}
-          lockVersion={lockVersion}
-        />
-      )}
+      {globalDialogs}
     </div>
   );
 }
@@ -10640,12 +10655,16 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.8.2';
+const APP_VERSION = '1.8.3';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '1.8.3',
+  date: '2026-08-07',
+  changes: [['fixed', 'Sharing an image showed the lock message but nothing after unlocking — the dialog was only mounted on the person page, never the home screen'], ['changed', 'App-wide dialogs are now defined once and shown on every screen, so none can go missing again']]
+}, {
   version: '1.8.2',
   date: '2026-08-07',
   changes: [['fixed', 'Sharing a screenshot opened the app but appeared to do nothing — the shared file was written to a path the page did not look in'], ['added', 'A share now shows its progress: picking up the image, looking at it, then the result'], ['added', 'If nothing comes through, it says why and offers to pick the image manually'], ['added', 'Sharing to a locked app says an image is waiting, and opens it once unlocked']]
@@ -11785,6 +11804,97 @@ function RelationshipTracker() {
   }, [people]);
 
   // ---------- Detail (single person) view ----------
+  // Dialogs that belong to the app rather than to one screen. Defined once and
+  // rendered by both views — mounting them in only one is exactly how a shared
+  // image could arrive and never be shown.
+  const globalDialogs = /*#__PURE__*/React.createElement(React.Fragment, null, shared && /*#__PURE__*/React.createElement(SharedImageModal, {
+    state: shared,
+    people: people,
+    onCancel: () => setShared(null),
+    onPickManually: () => {
+      setShared(null);
+      setShowChatImport(true);
+    },
+    onProfile: () => {
+      setPendingImportFiles({
+        kind: 'profile',
+        files: shared.files
+      });
+      setShared(null);
+      setShowProfileImport(true);
+    },
+    onChat: () => {
+      setPendingImportFiles({
+        kind: 'chat',
+        files: shared.files
+      });
+      setShared(null);
+      setShowChatImport(true);
+    }
+  }), syncConflict && /*#__PURE__*/React.createElement(SyncConflictModal, {
+    info: syncConflict,
+    onKeepLocal: () => resolveConflict('local'),
+    onTakeRemote: () => resolveConflict('remote'),
+    onMerge: () => resolveConflict('merge'),
+    onCancel: () => setSyncConflict(null)
+  }), confirmAction && /*#__PURE__*/React.createElement(ConfirmModal, {
+    title: confirmAction.title,
+    body: confirmAction.body,
+    detail: confirmAction.detail,
+    confirmLabel: confirmAction.confirmLabel,
+    onCancel: () => setConfirmAction(null),
+    onConfirm: async () => {
+      const run = confirmAction.run;
+      setConfirmAction(null);
+      await run();
+    }
+  }), showChangelog && /*#__PURE__*/React.createElement(ChangelogModal, {
+    sinceVersion: showChangelog === 'all' ? null : showChangelog,
+    onClose: () => setShowChangelog(null)
+  }), showProfileImport && /*#__PURE__*/React.createElement(ProfileImportModal, {
+    initialFiles: pendingImportFiles && pendingImportFiles.kind === 'profile' ? pendingImportFiles.files : null,
+    onConsumedFiles: () => setPendingImportFiles(null),
+    onCancel: () => setShowProfileImport(false),
+    onCreate: handleCreateFromImport,
+    onOverwrite: handleOverwriteFromImport,
+    existingPeople: people,
+    knownChannels: knownChannels
+  }), showChatImport && /*#__PURE__*/React.createElement(ChatImportModal, {
+    initialFiles: pendingImportFiles && pendingImportFiles.kind === 'chat' ? pendingImportFiles.files : null,
+    onConsumedFiles: () => setPendingImportFiles(null),
+    people: people,
+    onCommit: (payload, targetId, date) => commitConversation(payload, targetId, date),
+    onCreatePerson: createPersonForChat,
+    onClose: results => {
+      setShowChatImport(false);
+      if (results && results.length) setNotice(results.length + ' chat' + (results.length === 1 ? '' : 's') + ' imported.');
+    }
+  }), showInsights && /*#__PURE__*/React.createElement(InsightsModal, {
+    people: people,
+    onClose: () => setShowInsights(false)
+  }), showSettings && /*#__PURE__*/React.createElement(SettingsModal, {
+    onClose: () => setShowSettings(false),
+    people: people,
+    onImportData: async imported => {
+      await persist(imported);
+    },
+    syncState: syncState,
+    onConnectSync: connectSync,
+    onDisconnectSync: disconnectSync,
+    onSyncNow: () => pullFromCloud(false),
+    onExported: d => {
+      setExportStamp(d);
+      setBackupNag(false);
+    },
+    onLockChanged: () => setLockVersion(v => v + 1),
+    onRestoreMerge: ppl => restoreFromHistory(ppl, 'merge'),
+    onRestoreReplace: ppl => restoreFromHistory(ppl, 'replace'),
+    onShowChangelog: () => setShowChangelog('all'),
+    lockVersion: lockVersion
+  }), notice && /*#__PURE__*/React.createElement(NoticeToast, {
+    message: notice,
+    onClose: () => setNotice('')
+  }));
   if (locked) {
     return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(LockScreen, {
       onUnlock: () => setLocked(false)
@@ -12094,12 +12204,6 @@ function RelationshipTracker() {
     }), lightbox && /*#__PURE__*/React.createElement(Lightbox, {
       photo: lightbox,
       onClose: () => setLightbox(null)
-    }), syncConflict && /*#__PURE__*/React.createElement(SyncConflictModal, {
-      info: syncConflict,
-      onKeepLocal: () => resolveConflict('local'),
-      onTakeRemote: () => resolveConflict('remote'),
-      onMerge: () => resolveConflict('merge'),
-      onCancel: () => setSyncConflict(null)
     }), confirmAction && /*#__PURE__*/React.createElement(ConfirmModal, {
       title: confirmAction.title,
       body: confirmAction.body,
@@ -12111,36 +12215,6 @@ function RelationshipTracker() {
         setConfirmAction(null);
         await run();
       }
-    }), shared && /*#__PURE__*/React.createElement(SharedImageModal, {
-      state: shared,
-      people: people,
-      onCancel: () => setShared(null),
-      onPickManually: () => {
-        setShared(null);
-        setShowChatImport(true);
-      },
-      onProfile: () => {
-        setPendingImportFiles({
-          kind: 'profile',
-          files: shared.files
-        });
-        setShared(null);
-        setShowProfileImport(true);
-      },
-      onChat: () => {
-        setPendingImportFiles({
-          kind: 'chat',
-          files: shared.files
-        });
-        setShared(null);
-        setShowChatImport(true);
-      }
-    }), showChangelog && /*#__PURE__*/React.createElement(ChangelogModal, {
-      sinceVersion: showChangelog === 'all' ? null : showChangelog,
-      onClose: () => setShowChangelog(null)
-    }), notice && /*#__PURE__*/React.createElement(NoticeToast, {
-      message: notice,
-      onClose: () => setNotice('')
     }), dateConfirm && /*#__PURE__*/React.createElement(ChatDateConfirmModal, {
       info: dateConfirm,
       onCancel: () => setDateConfirm(null),
@@ -12187,21 +12261,10 @@ function RelationshipTracker() {
       onShowChangelog: () => setShowChangelog('all'),
       onShowChangelog: () => setShowChangelog('all'),
       lockVersion: lockVersion
-    }), confirmAction && /*#__PURE__*/React.createElement(ConfirmModal, {
-      title: confirmAction.title,
-      body: confirmAction.body,
-      detail: confirmAction.detail,
-      confirmLabel: confirmAction.confirmLabel,
-      onCancel: () => setConfirmAction(null),
-      onConfirm: async () => {
-        const run = confirmAction.run;
-        setConfirmAction(null);
-        await run();
-      }
     }), showChangelog && /*#__PURE__*/React.createElement(ChangelogModal, {
       sinceVersion: showChangelog === 'all' ? null : showChangelog,
       onClose: () => setShowChangelog(null)
-    }), error && /*#__PURE__*/React.createElement(ErrorToast, {
+    }), globalDialogs, error && /*#__PURE__*/React.createElement(ErrorToast, {
       message: error
     }));
   }
@@ -12423,50 +12486,7 @@ function RelationshipTracker() {
     onCancel: cancelPersonForm,
     onSave: savePersonForm,
     knownChannels: knownChannels
-  }), showProfileImport && /*#__PURE__*/React.createElement(ProfileImportModal, {
-    initialFiles: pendingImportFiles && pendingImportFiles.kind === 'profile' ? pendingImportFiles.files : null,
-    onConsumedFiles: () => setPendingImportFiles(null),
-    onCancel: () => setShowProfileImport(false),
-    onCreate: handleCreateFromImport,
-    onOverwrite: handleOverwriteFromImport,
-    existingPeople: people,
-    knownChannels: knownChannels
-  }), showChatImport && /*#__PURE__*/React.createElement(ChatImportModal, {
-    initialFiles: pendingImportFiles && pendingImportFiles.kind === 'chat' ? pendingImportFiles.files : null,
-    onConsumedFiles: () => setPendingImportFiles(null),
-    people: people,
-    onCommit: (payload, targetId, date) => commitConversation(payload, targetId, date),
-    onCreatePerson: createPersonForChat,
-    onClose: results => {
-      setShowChatImport(false);
-      if (results && results.length) setNotice(results.length + ' chat' + (results.length === 1 ? '' : 's') + ' imported.');
-    }
-  }), notice && /*#__PURE__*/React.createElement(NoticeToast, {
-    message: notice,
-    onClose: () => setNotice('')
-  }), showInsights && /*#__PURE__*/React.createElement(InsightsModal, {
-    people: people,
-    onClose: () => setShowInsights(false)
-  }), showSettings && /*#__PURE__*/React.createElement(SettingsModal, {
-    onClose: () => setShowSettings(false),
-    people: people,
-    onImportData: async imported => {
-      await persist(imported);
-    },
-    syncState: syncState,
-    onConnectSync: connectSync,
-    onDisconnectSync: disconnectSync,
-    onSyncNow: () => pullFromCloud(false),
-    onExported: d => {
-      setExportStamp(d);
-      setBackupNag(false);
-    },
-    onLockChanged: () => setLockVersion(v => v + 1),
-    onRestoreMerge: ppl => restoreFromHistory(ppl, 'merge'),
-    onRestoreReplace: ppl => restoreFromHistory(ppl, 'replace'),
-    onShowChangelog: () => setShowChangelog('all'),
-    lockVersion: lockVersion
-  }));
+  }), globalDialogs);
 }
 
 // ---------- Shared UI bits ----------
