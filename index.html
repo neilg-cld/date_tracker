@@ -402,7 +402,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-07 21:42 IST';
+const BUILD_STAMP = '2026-08-07 21:52 IST';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -3030,24 +3030,31 @@ function registerServiceWorker() {
 
 // Anything Android handed us is waiting in a cache the worker wrote.
 async function collectSharedImages() {
-  if (!('caches' in window)) return [];
+  if (typeof caches === 'undefined') return { files: [], note: 'This browser has no cache storage, so shared images cannot be picked up.' };
   try {
     const cache = await caches.open('rt-shared');
-    const metaRes = await cache.match('./__shared__');
-    if (!metaRes) return [];
-    const meta = await metaRes.json();
+    // Scan the cache rather than matching one exact URL: the path the worker
+    // wrote and the path the page resolves can differ by scope.
+    const keys = await cache.keys();
+    const imageKeys = keys.filter(r => /__shared__\/\d+$/.test(r.url));
+    if (!imageKeys.length) {
+      return { files: [], note: keys.length
+        ? 'The share arrived but no image was attached to it.'
+        : 'Nothing was waiting — the share may have been sent before the app finished installing.' };
+    }
+    imageKeys.sort((a, b) => a.url.localeCompare(b.url));
     const files = [];
-    for (const item of meta) {
-      const res = await cache.match('./__shared__/' + item.index);
+    for (const req of imageKeys) {
+      const res = await cache.match(req);
       if (!res) continue;
       const blob = await res.blob();
-      files.push(new File([blob], item.name || 'shared.jpg', { type: item.type || blob.type || 'image/jpeg' }));
+      if (!blob || !blob.size) continue;
+      files.push(new File([blob], 'shared-' + files.length + '.jpg', { type: blob.type || 'image/jpeg' }));
     }
-    await cache.delete('./__shared__');
-    await Promise.all(meta.map(item => cache.delete('./__shared__/' + item.index)));
-    return files;
+    await Promise.all(keys.map(k => cache.delete(k)));
+    return { files, note: '' };
   } catch (e) {
-    return [];
+    return { files: [], note: 'Could not read the shared image: ' + String(e.message || e) };
   }
 }
 
@@ -3085,10 +3092,21 @@ async function classifyScreenshot(file) {
   }
 }
 
-function SharedImageModal({ files, guess, busy, people, onProfile, onChat, onCancel }) {
+function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickManually }) {
+  const { files, guess, phase, note } = state;
   const match = guess && guess.name
     ? people.map(p => ({ p, score: nameSimilarity(guess.name, p.name) })).filter(x => x.score >= 0.8).sort((a, b) => b.score - a.score)[0]
     : null;
+
+  const stageText = {
+    collecting: 'Picking up the shared image…',
+    analysing: 'Taking a quick look at it…',
+    ready: '',
+    empty: 'No image came through.',
+  }[phase] || '';
+
+  const percent = { collecting: 25, analysing: 65, ready: 100, empty: 0 }[phase] || 0;
+
   return (
     <div className="fixed inset-0 bg-black/60 z-[80] flex items-center justify-center p-4">
       <div className="bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto">
@@ -3096,9 +3114,26 @@ function SharedImageModal({ files, guess, busy, people, onProfile, onChat, onCan
           {files.length > 1 ? files.length + ' images shared' : 'Image shared'}
         </h3>
 
-        {busy ? (
-          <p className="text-sm text-stone-600 py-3">Having a quick look at it…</p>
-        ) : (
+        {(phase === 'collecting' || phase === 'analysing') && (
+          <div className="py-2">
+            <p className="text-sm text-stone-600 mb-2">{stageText}</p>
+            <div className="h-1.5 bg-stone-200 rounded-full overflow-hidden">
+              <div className="h-full bg-stone-800" style={{ width: percent + '%' }} />
+            </div>
+          </div>
+        )}
+
+        {phase === 'empty' && (
+          <>
+            <p className="text-sm text-stone-700">{note || stageText}</p>
+            <button onClick={onPickManually}
+              className="mt-4 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800">
+              Choose the image myself
+            </button>
+          </>
+        )}
+
+        {phase === 'ready' && (
           <>
             <p className="text-sm text-stone-700">
               {guess && guess.kind === 'profile' && 'Looks like a dating profile'}
@@ -3108,25 +3143,28 @@ function SharedImageModal({ files, guess, busy, people, onProfile, onChat, onCan
               {guess && guess.app ? ' on ' + guess.app : ''}.
               {match ? ' ' + match.p.name + ' is already in your list.' : ''}
             </p>
+            {note && <p className="text-xs text-amber-700 mt-1">{note}</p>}
             {guess && guess.confidence === 'low' && (
               <p className="text-xs text-amber-700 mt-1">Not a confident read — check before saving.</p>
             )}
+            <button onClick={onChat}
+              className={`mt-4 w-full rounded-md py-2 text-sm font-medium ${
+                guess && guess.kind === 'chat' ? 'bg-stone-900 text-white hover:bg-stone-800' : 'border border-stone-300 hover:bg-stone-100'
+              }`}>
+              Read as a conversation
+            </button>
+            <button onClick={onProfile}
+              className={`mt-2 w-full rounded-md py-2 text-sm font-medium ${
+                guess && guess.kind === 'profile' ? 'bg-stone-900 text-white hover:bg-stone-800' : 'border border-stone-300 hover:bg-stone-100'
+              }`}>
+              Read as a profile
+            </button>
           </>
         )}
 
-        <button onClick={onChat} disabled={busy}
-          className={`mt-4 w-full rounded-md py-2 text-sm font-medium disabled:opacity-50 ${
-            guess && guess.kind === 'chat' ? 'bg-stone-900 text-white hover:bg-stone-800' : 'border border-stone-300 hover:bg-stone-100'
-          }`}>
-          Read as a conversation
+        <button onClick={onCancel} className="w-full text-sm text-stone-500 py-2 mt-1">
+          {phase === 'ready' || phase === 'empty' ? 'Not now' : 'Cancel'}
         </button>
-        <button onClick={onProfile} disabled={busy}
-          className={`mt-2 w-full rounded-md py-2 text-sm font-medium disabled:opacity-50 ${
-            guess && guess.kind === 'profile' ? 'bg-stone-900 text-white hover:bg-stone-800' : 'border border-stone-300 hover:bg-stone-100'
-          }`}>
-          Read as a profile
-        </button>
-        <button onClick={onCancel} className="w-full text-sm text-stone-500 py-2 mt-1">Not now</button>
       </div>
     </div>
   );
@@ -3137,12 +3175,20 @@ function SharedImageModal({ files, guess, busy, people, onProfile, onChat, onCan
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.8.1';
+const APP_VERSION = '1.8.2';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '1.8.2', date: '2026-08-07', changes: [
+      ['fixed', 'Sharing a screenshot opened the app but appeared to do nothing — the shared file was written to a path the page did not look in'],
+      ['added', 'A share now shows its progress: picking up the image, looking at it, then the result'],
+      ['added', 'If nothing comes through, it says why and offers to pick the image manually'],
+      ['added', 'Sharing to a locked app says an image is waiting, and opens it once unlocked'],
+    ],
+  },
   {
     version: '1.8.1', date: '2026-08-07', changes: [
       ['changed', 'New app icon: a thick heart outline with a rising bar chart inside, for the record being kept'],
@@ -3526,20 +3572,28 @@ function RelationshipTracker() {
 
   useEffect(() => { load().then(() => { if (Sync.configured()) pullFromCloud(true); }); }, []);
 
-  // An image arriving from the Android share sheet lands here.
+  // An image arriving from the Android share sheet lands here. The dialog opens
+  // straight away so there is always something on screen.
   useEffect(() => {
     if (!/[?&]shared=/.test(window.location.search)) return;
-    // Clear the marker so a refresh does not reopen this.
     try { window.history.replaceState({}, '', window.location.pathname); } catch (e) {}
+    setShared({ files: [], guess: null, phase: 'collecting', note: '' });
     (async () => {
-      const files = await collectSharedImages();
-      if (!files.length) return;
-      setShared({ files, guess: null, busy: true });
+      const { files, note } = await collectSharedImages();
+      if (!files.length) {
+        setShared({ files: [], guess: null, phase: 'empty', note });
+        return;
+      }
+      setShared({ files, guess: null, phase: 'analysing', note: '' });
       try {
         const guess = await classifyScreenshot(files[0]);
-        setShared({ files, guess, busy: false });
+        setShared({ files, guess, phase: 'ready', note: '' });
       } catch (e) {
-        setShared({ files, guess: null, busy: false });
+        // Without a read it still needs routing — just ask instead of guessing.
+        setShared({
+          files, guess: null, phase: 'ready',
+          note: friendlyExtractError(e) || 'Could not work out what it is — pick below.',
+        });
       }
     })();
   }, []);
@@ -4211,7 +4265,18 @@ function RelationshipTracker() {
   }, [people]);
 
   // ---------- Detail (single person) view ----------
-  if (locked) return <LockScreen onUnlock={() => setLocked(false)} />;
+  if (locked) {
+    return (
+      <>
+        <LockScreen onUnlock={() => setLocked(false)} />
+        {shared && (
+          <div className="fixed bottom-4 left-4 right-4 max-w-xs mx-auto bg-stone-900 text-white text-sm rounded-md px-3 py-2 text-center">
+            An image was shared — unlock to read it.
+          </div>
+        )}
+      </>
+    );
+  }
 
   if (selected) {
     const labels = dateLabelsForPerson(selected);
@@ -4560,11 +4625,10 @@ function RelationshipTracker() {
       )}
       {shared && (
         <SharedImageModal
-          files={shared.files}
-          guess={shared.guess}
-          busy={shared.busy}
+          state={shared}
           people={people}
           onCancel={() => setShared(null)}
+          onPickManually={() => { setShared(null); setShowChatImport(true); }}
           onProfile={() => { setPendingImportFiles({ kind: 'profile', files: shared.files }); setShared(null); setShowProfileImport(true); }}
           onChat={() => { setPendingImportFiles({ kind: 'chat', files: shared.files }); setShared(null); setShowChatImport(true); }}
         />
@@ -7534,7 +7598,7 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-07 21:42 IST';
+const BUILD_STAMP = '2026-08-07 21:52 IST';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -10417,26 +10481,43 @@ function registerServiceWorker() {
 
 // Anything Android handed us is waiting in a cache the worker wrote.
 async function collectSharedImages() {
-  if (!('caches' in window)) return [];
+  if (typeof caches === 'undefined') return {
+    files: [],
+    note: 'This browser has no cache storage, so shared images cannot be picked up.'
+  };
   try {
     const cache = await caches.open('rt-shared');
-    const metaRes = await cache.match('./__shared__');
-    if (!metaRes) return [];
-    const meta = await metaRes.json();
+    // Scan the cache rather than matching one exact URL: the path the worker
+    // wrote and the path the page resolves can differ by scope.
+    const keys = await cache.keys();
+    const imageKeys = keys.filter(r => /__shared__\/\d+$/.test(r.url));
+    if (!imageKeys.length) {
+      return {
+        files: [],
+        note: keys.length ? 'The share arrived but no image was attached to it.' : 'Nothing was waiting — the share may have been sent before the app finished installing.'
+      };
+    }
+    imageKeys.sort((a, b) => a.url.localeCompare(b.url));
     const files = [];
-    for (const item of meta) {
-      const res = await cache.match('./__shared__/' + item.index);
+    for (const req of imageKeys) {
+      const res = await cache.match(req);
       if (!res) continue;
       const blob = await res.blob();
-      files.push(new File([blob], item.name || 'shared.jpg', {
-        type: item.type || blob.type || 'image/jpeg'
+      if (!blob || !blob.size) continue;
+      files.push(new File([blob], 'shared-' + files.length + '.jpg', {
+        type: blob.type || 'image/jpeg'
       }));
     }
-    await cache.delete('./__shared__');
-    await Promise.all(meta.map(item => cache.delete('./__shared__/' + item.index)));
-    return files;
+    await Promise.all(keys.map(k => cache.delete(k)));
+    return {
+      files,
+      note: ''
+    };
   } catch (e) {
-    return [];
+    return {
+      files: [],
+      note: 'Could not read the shared image: ' + String(e.message || e)
+    };
   }
 }
 const CLASSIFY_PROMPT = `Look at this screenshot and say what it is. Respond with ONLY a JSON object, no other text:
@@ -10485,42 +10566,73 @@ async function classifyScreenshot(file) {
   }
 }
 function SharedImageModal({
-  files,
-  guess,
-  busy,
+  state,
   people,
   onProfile,
   onChat,
-  onCancel
+  onCancel,
+  onPickManually
 }) {
+  const {
+    files,
+    guess,
+    phase,
+    note
+  } = state;
   const match = guess && guess.name ? people.map(p => ({
     p,
     score: nameSimilarity(guess.name, p.name)
   })).filter(x => x.score >= 0.8).sort((a, b) => b.score - a.score)[0] : null;
+  const stageText = {
+    collecting: 'Picking up the shared image…',
+    analysing: 'Taking a quick look at it…',
+    ready: '',
+    empty: 'No image came through.'
+  }[phase] || '';
+  const percent = {
+    collecting: 25,
+    analysing: 65,
+    ready: 100,
+    empty: 0
+  }[phase] || 0;
   return /*#__PURE__*/React.createElement("div", {
     className: "fixed inset-0 bg-black/60 z-[80] flex items-center justify-center p-4"
   }, /*#__PURE__*/React.createElement("div", {
     className: "bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "font-serif text-lg mb-1"
-  }, files.length > 1 ? files.length + ' images shared' : 'Image shared'), busy ? /*#__PURE__*/React.createElement("p", {
-    className: "text-sm text-stone-600 py-3"
-  }, "Having a quick look at it…") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+  }, files.length > 1 ? files.length + ' images shared' : 'Image shared'), (phase === 'collecting' || phase === 'analysing') && /*#__PURE__*/React.createElement("div", {
+    className: "py-2"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-600 mb-2"
+  }, stageText), /*#__PURE__*/React.createElement("div", {
+    className: "h-1.5 bg-stone-200 rounded-full overflow-hidden"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "h-full bg-stone-800",
+    style: {
+      width: percent + '%'
+    }
+  }))), phase === 'empty' && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-700"
-  }, guess && guess.kind === 'profile' && 'Looks like a dating profile', guess && guess.kind === 'chat' && 'Looks like a conversation', (!guess || guess.kind === 'other') && 'Not sure what this is', guess && guess.name ? ' — ' + guess.name : '', guess && guess.app ? ' on ' + guess.app : '', ".", match ? ' ' + match.p.name + ' is already in your list.' : ''), guess && guess.confidence === 'low' && /*#__PURE__*/React.createElement("p", {
+  }, note || stageText), /*#__PURE__*/React.createElement("button", {
+    onClick: onPickManually,
+    className: "mt-4 w-full bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800"
+  }, "Choose the image myself")), phase === 'ready' && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-stone-700"
+  }, guess && guess.kind === 'profile' && 'Looks like a dating profile', guess && guess.kind === 'chat' && 'Looks like a conversation', (!guess || guess.kind === 'other') && 'Not sure what this is', guess && guess.name ? ' — ' + guess.name : '', guess && guess.app ? ' on ' + guess.app : '', ".", match ? ' ' + match.p.name + ' is already in your list.' : ''), note && /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-amber-700 mt-1"
-  }, "Not a confident read — check before saving.")), /*#__PURE__*/React.createElement("button", {
+  }, note), guess && guess.confidence === 'low' && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-amber-700 mt-1"
+  }, "Not a confident read — check before saving."), /*#__PURE__*/React.createElement("button", {
     onClick: onChat,
-    disabled: busy,
-    className: `mt-4 w-full rounded-md py-2 text-sm font-medium disabled:opacity-50 ${guess && guess.kind === 'chat' ? 'bg-stone-900 text-white hover:bg-stone-800' : 'border border-stone-300 hover:bg-stone-100'}`
+    className: `mt-4 w-full rounded-md py-2 text-sm font-medium ${guess && guess.kind === 'chat' ? 'bg-stone-900 text-white hover:bg-stone-800' : 'border border-stone-300 hover:bg-stone-100'}`
   }, "Read as a conversation"), /*#__PURE__*/React.createElement("button", {
     onClick: onProfile,
-    disabled: busy,
-    className: `mt-2 w-full rounded-md py-2 text-sm font-medium disabled:opacity-50 ${guess && guess.kind === 'profile' ? 'bg-stone-900 text-white hover:bg-stone-800' : 'border border-stone-300 hover:bg-stone-100'}`
-  }, "Read as a profile"), /*#__PURE__*/React.createElement("button", {
+    className: `mt-2 w-full rounded-md py-2 text-sm font-medium ${guess && guess.kind === 'profile' ? 'bg-stone-900 text-white hover:bg-stone-800' : 'border border-stone-300 hover:bg-stone-100'}`
+  }, "Read as a profile")), /*#__PURE__*/React.createElement("button", {
     onClick: onCancel,
     className: "w-full text-sm text-stone-500 py-2 mt-1"
-  }, "Not now")));
+  }, phase === 'ready' || phase === 'empty' ? 'Not now' : 'Cancel')));
 }
 
 // ---------- Version ----------
@@ -10528,12 +10640,16 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.8.1';
+const APP_VERSION = '1.8.2';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '1.8.2',
+  date: '2026-08-07',
+  changes: [['fixed', 'Sharing a screenshot opened the app but appeared to do nothing — the shared file was written to a path the page did not look in'], ['added', 'A share now shows its progress: picking up the image, looking at it, then the result'], ['added', 'If nothing comes through, it says why and offers to pick the image manually'], ['added', 'Sharing to a locked app says an image is waiting, and opens it once unlocked']]
+}, {
   version: '1.8.1',
   date: '2026-08-07',
   changes: [['changed', 'New app icon: a thick heart outline with a rising bar chart inside, for the record being kept'], ['added', 'Favicon and Apple touch icon']]
@@ -10837,33 +10953,54 @@ function RelationshipTracker() {
     });
   }, []);
 
-  // An image arriving from the Android share sheet lands here.
+  // An image arriving from the Android share sheet lands here. The dialog opens
+  // straight away so there is always something on screen.
   useEffect(() => {
     if (!/[?&]shared=/.test(window.location.search)) return;
-    // Clear the marker so a refresh does not reopen this.
     try {
       window.history.replaceState({}, '', window.location.pathname);
     } catch (e) {}
+    setShared({
+      files: [],
+      guess: null,
+      phase: 'collecting',
+      note: ''
+    });
     (async () => {
-      const files = await collectSharedImages();
-      if (!files.length) return;
+      const {
+        files,
+        note
+      } = await collectSharedImages();
+      if (!files.length) {
+        setShared({
+          files: [],
+          guess: null,
+          phase: 'empty',
+          note
+        });
+        return;
+      }
       setShared({
         files,
         guess: null,
-        busy: true
+        phase: 'analysing',
+        note: ''
       });
       try {
         const guess = await classifyScreenshot(files[0]);
         setShared({
           files,
           guess,
-          busy: false
+          phase: 'ready',
+          note: ''
         });
       } catch (e) {
+        // Without a read it still needs routing — just ask instead of guessing.
         setShared({
           files,
           guess: null,
-          busy: false
+          phase: 'ready',
+          note: friendlyExtractError(e) || 'Could not work out what it is — pick below.'
         });
       }
     })();
@@ -11648,9 +11785,13 @@ function RelationshipTracker() {
   }, [people]);
 
   // ---------- Detail (single person) view ----------
-  if (locked) return /*#__PURE__*/React.createElement(LockScreen, {
-    onUnlock: () => setLocked(false)
-  });
+  if (locked) {
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(LockScreen, {
+      onUnlock: () => setLocked(false)
+    }), shared && /*#__PURE__*/React.createElement("div", {
+      className: "fixed bottom-4 left-4 right-4 max-w-xs mx-auto bg-stone-900 text-white text-sm rounded-md px-3 py-2 text-center"
+    }, "An image was shared — unlock to read it."));
+  }
   if (selected) {
     const labels = dateLabelsForPerson(selected);
     const sortedDates = [...(selected.dates || [])].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -11971,11 +12112,13 @@ function RelationshipTracker() {
         await run();
       }
     }), shared && /*#__PURE__*/React.createElement(SharedImageModal, {
-      files: shared.files,
-      guess: shared.guess,
-      busy: shared.busy,
+      state: shared,
       people: people,
       onCancel: () => setShared(null),
+      onPickManually: () => {
+        setShared(null);
+        setShowChatImport(true);
+      },
       onProfile: () => {
         setPendingImportFiles({
           kind: 'profile',

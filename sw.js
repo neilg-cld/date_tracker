@@ -7,7 +7,7 @@
 // It does NOT cache index.html aggressively. A stale build is worse than a slow
 // one, so the network is always tried first and the cache is only a fallback.
 
-const CACHE = 'rt-shell-v1';
+const CACHE = 'rt-shell-v2';
 const SHARE_CACHE = 'rt-shared';
 
 self.addEventListener('install', (event) => {
@@ -42,17 +42,14 @@ self.addEventListener('fetch', (event) => {
         const form = await event.request.formData();
         const files = form.getAll('images').filter((f) => f && f.size);
         const cache = await caches.open(SHARE_CACHE);
-        // Stash each file as a cached Response; the page collects them on load.
-        await cache.delete('./__shared__');
-        if (files.length) {
-          const meta = files.map((f, i) => ({ index: i, name: f.name || ('shared-' + i), type: f.type }));
-          await cache.put('./__shared__', new Response(JSON.stringify(meta), {
-            headers: { 'Content-Type': 'application/json' },
-          }));
-          await Promise.all(files.map((f, i) => cache.put('./__shared__/' + i, new Response(f, {
-            headers: { 'Content-Type': f.type || 'image/jpeg' },
-          }))));
-        }
+        // Clear anything left from a previous share.
+        const old = await cache.keys();
+        await Promise.all(old.map((k) => cache.delete(k)));
+        // Absolute URLs, so the page finds them whatever its own path is.
+        const base = new URL('./', self.registration.scope).href;
+        await Promise.all(files.map((f, i) => cache.put(base + '__shared__/' + i, new Response(f, {
+          headers: { 'Content-Type': f.type || 'image/jpeg' },
+        }))));
         return Response.redirect('./?shared=' + files.length, 303);
       } catch (e) {
         return Response.redirect('./?shared=0', 303);
