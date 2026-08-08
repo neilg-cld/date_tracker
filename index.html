@@ -1119,6 +1119,36 @@ function relEndYm(person) {
   return '';
 }
 
+// Months are too coarse early on: "0 months" or "1 month" says nothing when you
+// are three weeks in. Days come from the real start date, not the month.
+function relStartDate(person) {
+  if (person.dateMet) return person.dateMet;
+  const first = [...(person.conversationDays || []).map(d => d.date),
+    ...(person.dates || []).map(d => d.date)].filter(Boolean).sort()[0];
+  if (first) return first;
+  if (person.relStart) return person.relStart + '-01';
+  return '';
+}
+
+function relSpanDays(person) {
+  const start = relStartDate(person);
+  if (!start) return null;
+  const endYm = relEndYm(person);
+  const end = person.endDate || (endYm ? endYm + '-28' : TODAY());
+  return Math.max(0, daysBetween(start, end > TODAY() && !endYm ? TODAY() : end));
+}
+
+// Under three months, report the exact days; beyond that, months and years.
+function formatSpanDetailed(person) {
+  const months = relSpanMonths(person);
+  const days = relSpanDays(person);
+  // Judge on actual days, not calendar months: 10 May to 7 August spans three
+  // month boundaries but is still under three months of knowing her.
+  if (days !== null && days < 92) return days + (days === 1 ? ' day' : ' days');
+  if (months !== null) return formatSpan(months);
+  return days !== null ? days + ' days' : '';
+}
+
 function relSpanMonths(person) {
   const start = relStartYm(person);
   if (!start) return null;
@@ -1327,6 +1357,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 "relativeDayMarkers": array of strings — relative day dividers shown, exactly as printed ("Today", "Yesterday", "Monday"). Empty if all dividers are absolute dates.
 "sessions": array, oldest first, of objects:
   {
+    "panel": integer — the panel number this session begins in.
     "dayLabel": string or null (the divider exactly as printed above this session, e.g. "Today", "14 July"),
     "date": string or null (YYYY-MM-DD. RESOLVE THE DIVIDER — see the dating rules below. Null only if this session has no day information of any kind above it.),
     "summary": string — two or three sentences addressed to him on what this session was about and how it went between you and her. Second person throughout. Not a transcript.
@@ -1617,6 +1648,148 @@ function nameSimilarity(a, b) {
 
 // Read one or more chat screenshots into a single payload. Deduplication happens
 // at commit time, once the person it belongs to is known.
+const DATE_SCAN_PROMPT = `These images are consecutive vertical panels of ONE tall screenshot of a chat conversation, top to bottom. Your ONLY job is to find dates. Ignore the content of the messages entirely.
+
+Look at every panel and report every piece of date information you can see:
+- Day dividers between messages ("Today", "Yesterday", "Monday", "14 July", "14/07/2024", "Sat 3 Aug").
+- Any date printed beside a message or in a timestamp row.
+- A "you matched on" or "you connected on" banner.
+- The phone's status bar date, if the capture includes it.
+- A date written inside a message ("see you on the 14th").
+
+Respond with ONLY a JSON object, no other text:
+{
+"markers": array of objects {"panel": integer (which panel it appears in), "label": string (exactly as printed), "date": string or null (YYYY-MM-DD if you can work it out with certainty)},
+"yearEvidence": string or null — any year you can see anywhere in the image, as printed.
+}
+Report markers in the order they appear down the image. If a panel has no date information, do not invent one. An empty markers array is a valid answer, but look properly first — most chat screenshots contain at least one.`;
+
+// Dates get their own pass over the whole image. Reading in sections means a
+// section that happens to contain no divider has nothing to date itself with,
+// which is why so much was landing on today.
+async function scanForDates(imgEl, plans, onProgress) {
+  if (onProgress) onProgress('Looking for dates…');
+  const markers = [];
+  let yearEvidence = null;
+  const CHUNK = 6;                       // small output, so more panels per call
+  for (let i = 0; i < plans.length; i += CHUNK) {
+    const chunk = plans.slice(i, i + CHUNK);
+    const blocks = [];
+    chunk.forEach(plan => {
+      blocks.push({ type: 'text', text: 'Panel ' + plan.index + ':' });
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: renderPanel(imgEl, plan) } });
+    });
+    blocks.push({ type: 'text', text: DATE_SCAN_PROMPT });
+    try {
+      const res = await callVision(blocks, 1500);
+      (Array.isArray(res && res.markers) ? res.markers : []).forEach(mk => {
+        if (!mk || !mk.label) return;
+        markers.push({ panel: Number(mk.panel) || chunk[0].index, label: String(mk.label).trim(), date: mk.date || null });
+      });
+      if (!yearEvidence && res && res.yearEvidence) yearEvidence = String(res.yearEvidence);
+    } catch (e) { /* a missed section just means fewer markers */ }
+    finally {
+      blocks.forEach(b => { if (b.type === 'image') b.source.data = null; });
+    }
+  }
+  return { markers, yearEvidence };
+}
+
+// Turn the raw markers into dated anchors, resolving relative labels against
+// their neighbours rather than against today.
+function resolveMarkers(scan, captureDate) {
+  const markers = (scan.markers || []).map(m => ({ ...m, kind: labelKind(m.label) }));
+  const year = (scan.yearEvidence || '').match(/(19|20)\d{2}/);
+  const capture = captureDate || TODAY();
+
+  // 1. Certain on their own.
+  markers.forEach(m => {
+    if (m.date && /^\d{4}-\d{2}-\d{2}$/.test(m.date) && m.kind === 'absolute') { m.absolute = true; return; }
+    if (m.kind === 'absolute') {
+      m.date = parseDayLabel(m.label, TODAY());
+      m.absolute = !!m.date;
+      return;
+    }
+    m.date = null;
+  });
+
+  // 2. A bare day and month needs a year, not a capture date. Take one from the
+  //    image if there is one, otherwise from the nearest dated neighbour.
+  markers.forEach((m, i) => {
+    if (m.date || m.kind !== 'daymonth') return;
+    if (year) {
+      const withYear = parseDayLabel(m.label + ' ' + year[0], TODAY());
+      if (withYear) { m.date = withYear; m.absolute = true; return; }
+    }
+    let near = null;
+    for (let j = i - 1; j >= 0; j--) if (markers[j].date) { near = markers[j].date; break; }
+    if (!near) for (let j = i + 1; j < markers.length; j++) if (markers[j].date) { near = markers[j].date; break; }
+    m.date = parseDayLabel(m.label, near || capture);
+    m.absolute = !!near;
+  });
+
+  // 3. Relative labels are read against the capture day — never against an
+  //    absolute date elsewhere in the image, which says nothing about when the
+  //    screenshot was taken.
+  markers.forEach((m, i) => {
+    if (m.date || m.kind !== 'relative') return;
+    m.needsCapture = true;
+    let before = null;
+    for (let j = i - 1; j >= 0; j--) if (markers[j].date) { before = markers[j].date; break; }
+    if (/today|tonight|yesterday|tomorrow/i.test(m.label)) {
+      m.date = parseDayLabel(m.label, capture);
+    } else {
+      // A bare weekday sits after the date above it, but within the week ending
+      // on the capture day.
+      m.date = before ? parseDayLabel(m.label, before, true) : parseDayLabel(m.label, capture);
+    }
+    m.assumed = !captureDate;
+  });
+
+  // 4. Anything still undated takes a neighbour.
+  markers.forEach((m, i) => {
+    if (m.date) return;
+    for (let j = i - 1; j >= 0; j--) if (markers[j].date) { m.date = markers[j].date; m.assumed = true; return; }
+    for (let j = i + 1; j < markers.length; j++) if (markers[j].date) { m.date = markers[j].date; m.assumed = true; return; }
+    m.date = capture;
+    m.assumed = !captureDate;
+  });
+
+  return markers.filter(m => m.date).sort((a, b) => a.panel - b.panel);
+}
+
+// Once he says which day the screenshot was taken, every relative marker is
+// recalculated against it.
+function reanchorMarkers(markers, captureDate) {
+  if (!captureDate) return markers || [];
+  const out = (markers || []).map(m => ({ ...m }));
+  out.forEach((m, i) => {
+    if (!m.needsCapture && !m.assumed) return;
+    if (/today|tonight|yesterday|tomorrow/i.test(m.label || '')) {
+      m.date = parseDayLabel(m.label, captureDate) || captureDate;
+    } else {
+      let before = null;
+      for (let j = i - 1; j >= 0; j--) if (out[j].date && !out[j].needsCapture) { before = out[j].date; break; }
+      m.date = (before ? parseDayLabel(m.label, before, true) : parseDayLabel(m.label, captureDate)) || captureDate;
+    }
+    m.assumed = false;
+  });
+  return out.sort((a, b) => a.panel - b.panel);
+}
+
+// The latest date the image is certain about — the capture cannot be before it.
+function earliestPossibleCapture(markers) {
+  const abs = (markers || []).filter(m => m.absolute && m.date).map(m => m.date).sort();
+  return abs.length ? abs[abs.length - 1] : '';
+}
+
+// The date for a session is the last marker at or above where it starts.
+function dateForPanel(markers, panel) {
+  let found = null;
+  markers.forEach(m => { if (m.panel <= panel) found = m.date; });
+  return found || (markers.length ? markers[0].date : null);
+}
+
 async function extractChatPayload(files, onProgress) {
   let sessions = [], summaryParts = [], phoneNumbers = [], markers = [], dateEvents = [];
   let contactName = null, matchedDate = null, appName = null, lowConfidence = false, threadStart = false;
@@ -1624,6 +1797,7 @@ async function extractChatPayload(files, onProgress) {
   const imageWarnings = [];
   const coverage = { total: 0, read: 0, missing: [] };
   let dateEvidence = [];
+  let dateMarkers = [];
   let n = 0;
   for (const file of files) {
     n += 1;
@@ -1631,8 +1805,18 @@ async function extractChatPayload(files, onProgress) {
     const today = new Date(TODAY() + 'T00:00:00');
     const dated = CONVERSATION_EXTRACT_PROMPT + '\n\nToday is '
       + today.toLocaleDateString('en-IE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
-      + ' (' + TODAY() + '). Resolve every divider against that.';
-    const fields = await extractFromScreenshot(file, dated, 8000, mergeChatResults, onProgress, w => imageWarnings.push(w));
+      + ' (' + TODAY() + '). Use it only to resolve relative dividers such as "Today" or a weekday name. '
+      + 'Never date a session as today unless a divider actually says so — if you cannot tell, return null and leave it.';
+    let fields;
+    try {
+      fields = await extractFromScreenshotWithDates(file, dated, 8000, mergeChatResults, onProgress,
+        w => imageWarnings.push(w), m => { dateMarkers = dateMarkers.concat(m); });
+    } catch (e) {
+      // Say which image failed — with several selected, "it failed" is useless.
+      e.fileName = (file && file.name) || ('image ' + n);
+      e.message = String(e.message || e) + ' (' + e.fileName + ')';
+      throw e;
+    }
     if (fields.summary) summaryParts.push(fields.summary);
     if (Array.isArray(fields.sessions)) sessions = sessions.concat(fields.sessions);
     if (Array.isArray(fields.phoneNumbers)) phoneNumbers = phoneNumbers.concat(fields.phoneNumbers);
@@ -1657,13 +1841,26 @@ async function extractChatPayload(files, onProgress) {
     summary: summaryParts.join(' '), phoneNumbers, contactName, matchedDate, appName, dateEvents, threadStart,
     failedSections, imageWarnings, coverage,
     dateEvidence,
-    dateRange: sessionDateRange(datedSessions(sessions.filter(Boolean), null)),
+    dateMarkers,
+    dateRange: sessionDateRange(datedSessions(sessions.filter(Boolean), null, dateMarkers)),
     markers: Array.from(new Set(markers.filter(Boolean))),
     lowConfidence,
     totalPoints,
     // Only ask him if a session is still undated after local parsing.
-    needsDate: sessions.length > 0 && sessions.some(ses =>
-      ses && !ses.date && !parseDayLabel(ses.dayLabel, TODAY())),
+    // A relative divider can never be resolved from the image alone, however many
+    // absolute dates sit alongside it: "Today" is whenever the screenshot was
+    // taken. So it is always asked, and only skipped when nothing relative exists.
+    needsDate: sessions.length > 0 && (
+      dateMarkers.some(m => m.needsCapture)
+      || sessions.some(ses => ses && needsCaptureDate(ses.dayLabel))
+      || !dateMarkers.length
+    ),
+    relativeLabels: Array.from(new Set(
+      dateMarkers.filter(m => m.needsCapture).map(m => m.label)
+        .concat(sessions.filter(ses => ses && needsCaptureDate(ses.dayLabel)).map(ses => ses.dayLabel))
+    )).filter(Boolean),
+    earliestCapture: earliestPossibleCapture(dateMarkers),
+    assumedDates: dateMarkers.some(m => m.assumed),
   };
 }
 
@@ -1725,13 +1922,46 @@ function labelIsAbsolute(label) {
   return /\b(19|20)\d{2}\b/.test(t);
 }
 
-function datedSessions(sessions, fallbackDate) {
-  const list = (sessions || []).filter(Boolean).map(ses => ({ ...ses }));
+// What kind of date information is this label, and what does it need to resolve?
+//   absolute  — carries a year: certain on its own
+//   daymonth  — "14 July", "14/07": needs a year, not a capture date
+//   relative  — "Today", "Yesterday", a bare weekday: only means anything
+//               relative to the day the screenshot was taken
+function labelKind(label) {
+  const t = String(label || '').trim().toLowerCase();
+  if (!t) return 'unknown';
+  if (labelIsAbsolute(t)) return 'absolute';
+  if (/today|tonight|yesterday|tomorrow/.test(t)) return 'relative';
+  const isWeekday = WEEKDAYS.some(d => t.includes(d.slice(0, 3)));
+  const hasDayNumber = /\d/.test(t);
+  if (isWeekday && !hasDayNumber) return 'relative';
+  if (MONTHS.some(m => t.includes(m.slice(0, 3))) || /\d{1,2}[\/.\-]\d{1,2}/.test(t)) return 'daymonth';
+  return 'unknown';
+}
 
-  // 1. Trust what the model dated, and any label carrying a year.
+// Anything that can only be read against the capture day.
+function needsCaptureDate(label) {
+  return labelKind(label) === 'relative';
+}
+
+function datedSessions(sessions, fallbackDate, markers) {
+  const list = (sessions || []).filter(Boolean).map(ses => ({ ...ses }));
+  const marks = (markers || []).filter(m => m && m.date);
+
+  // 1. Trust an explicit date, and any label carrying a year.
   list.forEach(ses => {
     if (!ses.date && labelIsAbsolute(ses.dayLabel)) ses.date = parseDayLabel(ses.dayLabel, TODAY());
   });
+
+  // 2. The dedicated date scan covers the whole image, so it can date a session
+  //    whose own section contained no divider at all.
+  if (marks.length) {
+    list.forEach(ses => {
+      if (ses.date) return;
+      const panel = Number(ses.panel);
+      if (Number.isFinite(panel)) ses.date = dateForPanel(marks, panel);
+    });
+  }
 
   const anchorFor = (i) => {
     for (let j = i - 1; j >= 0; j--) if (list[j].date) return list[j].date;
@@ -1739,34 +1969,30 @@ function datedSessions(sessions, fallbackDate) {
     return null;
   };
 
-  // 2. Resolve relative labels against the nearest dated session, not today —
-  //    otherwise "Monday" in a chat from 2024 lands in this week.
-  // The most recent absolute date in the image stands in for "today" when the
-  // screenshot itself is old.
-  const absolutes = list.map(x => x.date).filter(Boolean).sort();
+  const absolutes = list.map(x => x.date).filter(Boolean).sort()
+    .concat(marks.map(m => m.date)).sort();
   const latestAbsolute = absolutes.length ? absolutes[absolutes.length - 1] : null;
 
+  // 3. Relative labels resolve against the dates around them.
   list.forEach((ses, i) => {
     if (ses.date || !ses.dayLabel) return;
     let before = null;
     for (let j = i - 1; j >= 0; j--) if (list[j].date) { before = list[j].date; break; }
-    const relativeToNow = /today|tonight|yesterday/i.test(ses.dayLabel);
-    if (relativeToNow) {
+    if (/today|tonight|yesterday/i.test(ses.dayLabel)) {
       const base = (latestAbsolute && latestAbsolute < TODAY()) ? latestAbsolute : TODAY();
       ses.date = parseDayLabel(ses.dayLabel, base);
       return;
     }
-    // Read forward from the date above it, or back from the one below.
     ses.date = before
       ? parseDayLabel(ses.dayLabel, before, true)
       : parseDayLabel(ses.dayLabel, anchorFor(i) || TODAY());
   });
 
-  // 3. Sessions with no label at all sit with their neighbours.
+  // 4. Unlabelled sessions sit with their neighbours.
   list.forEach((ses, i) => { if (!ses.date) ses.date = anchorFor(i); });
 
-  // 4. Only now fall back to the date he confirmed, or today.
-  return list.map((ses, i) => ({ ...ses, date: ses.date || fallbackDate || TODAY(), order: i }));
+  // 5. Today is genuinely the last resort now.
+  return list.map((ses, i) => ({ ...ses, date: ses.date || fallbackDate || latestAbsolute || TODAY(), order: i }));
 }
 
 function sessionDateRange(sessions) {
@@ -1864,7 +2090,14 @@ async function runProfileExtraction(files, onProgress) {
       imgEl = await loadImageEl(file);
       panels = sliceImageToPanels(imgEl);
       if (onProgress) onProgress(`Reading image ${fileNo} of ${files.length} (${panels.length} panel${panels.length === 1 ? '' : 's'})…`);
-      const fields = await extractFromPanels(imgEl, panels, PROFILE_EXTRACT_PROMPT, 4000, mergeProfileResults, onProgress);
+      let fields;
+      try {
+        fields = await extractFromPanels(imgEl, panels, PROFILE_EXTRACT_PROMPT, 4000, mergeProfileResults, onProgress);
+      } catch (e) {
+        e.fileName = (file && file.name) || ('image ' + fileNo);
+        e.message = String(e.message || e) + ' (' + e.fileName + ')';
+        throw e;
+      }
       if (!name && fields.name) name = String(fields.name).trim();
       mergeProfileDrafts(profile, fields);
       const regions = Array.isArray(fields.photoRegions) ? fields.photoRegions : [];
@@ -2256,6 +2489,26 @@ function mergeChatResults(results) {
 
 // Single-image extraction (chat screenshots, date plans) — still panel-sliced so
 // long conversations stay legible.
+// Reads the conversation and scans for dates in one pass over the image, so the
+// bitmap is only decoded once.
+async function extractFromScreenshotWithDates(file, prompt, maxTokens, merge, onProgress, onWarn, onMarkers) {
+  requireApiKey();
+  const imgEl = await loadImageEl(file);
+  if (onWarn) assessScreenshot(imgEl).problems.forEach(onWarn);
+  const plans = sliceImageToPanels(imgEl);
+  try {
+    const scan = await scanForDates(imgEl, plans, onProgress);
+    const markers = resolveMarkers(scan);
+    if (onMarkers) onMarkers(markers);
+    const fields = await extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgress);
+    fields.dateMarkers = markers;
+    return fields;
+  } finally {
+    try { URL.revokeObjectURL(imgEl.src); } catch (e) {}
+    imgEl.src = '';
+  }
+}
+
 async function extractFromScreenshot(file, prompt, maxTokens, merge, onProgress, onWarn) {
   requireApiKey();
   const imgEl = await loadImageEl(file);
@@ -3175,12 +3428,45 @@ function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickMa
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.8.3';
+const APP_VERSION = '1.11.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '1.11.0', date: '2026-08-08', changes: [
+      ['changed', 'A relative divider always prompts now: an absolute date elsewhere in the image says nothing about when the screenshot was taken'],
+      ['changed', 'The prompt asks it plainly — It says "Today" — what date is that?'],
+      ['added', 'Date labels are classified as absolute, day-and-month, or relative, and only relative ones need you'],
+      ['added', 'The capture date cannot be set earlier than a message already dated in the chat'],
+      ['added', 'Quick options for today, yesterday and a week ago, with a live preview of what each divider becomes'],
+    ],
+  },
+  {
+    version: '1.10.1', date: '2026-08-08', changes: [
+      ['fixed', '"Today" in a screenshot means the day it was captured, not the day it was imported — the app was treating them as the same'],
+      ['added', 'When a chat is dated only by relative dividers, it asks when the screenshot was taken and works everything out from that'],
+      ['added', 'The confirmation dialog previews what each divider becomes as you change the date'],
+      ['changed', 'A chat with an absolute date anywhere in the image is no longer questioned'],
+    ],
+  },
+  {
+    version: '1.10.0', date: '2026-08-07', changes: [
+      ['fixed', 'Dates defaulted to today far too often: a section containing no divider had nothing to date itself with'],
+      ['added', 'A dedicated pass scans the whole image for dates before the conversation is read, and every session takes the date of the marker above it'],
+      ['added', 'A year seen anywhere in the image is applied to bare day-and-month dividers'],
+      ['changed', 'The reader is told never to date something as today unless a divider says so'],
+      ['added', 'Import lists the date markers it found, so a wrong date is visible before saving'],
+    ],
+  },
+  {
+    version: '1.9.0', date: '2026-08-07', changes: [
+      ['added', 'A screenshot that cannot be read now names the file it failed on'],
+      ['changed', 'Next date and the write-it-up prompt are separate boxes, with Add to calendar as its own button'],
+      ['changed', 'Relationships under three months show exact days rather than rounded months, keeping the month headline'],
+    ],
+  },
   {
     version: '1.8.3', date: '2026-08-07', changes: [
       ['fixed', 'Sharing an image showed the lock message but nothing after unlocking — the dialog was only mounted on the person page, never the home screen'],
@@ -4061,7 +4347,8 @@ function RelationshipTracker() {
     setChatImport(null);
     setDateConfirm(null);
 
-    const incoming = datedSessions(payload.sessions, confirmedDate);
+    const markers = reanchorMarkers(payload.dateMarkers, confirmedDate);
+    const incoming = datedSessions(payload.sessions, confirmedDate, markers);
     const knownKeys = existingPointKeys(target.conversationLog);
     const { days, addedFacts, addedPoints, dropped } = mergeSessions(target.conversationDays, incoming, knownKeys);
 
@@ -4412,7 +4699,7 @@ function RelationshipTracker() {
                         <span className="font-medium text-stone-800">
                           {fmt(start)} – {end ? fmt(end) : 'now'}
                         </span>
-                        {span !== null && <span className="text-stone-500">· {formatSpan(span)}</span>}
+                        {span !== null && <span className="text-stone-500">· {formatSpanDetailed(selected)}</span>}
                         <span className="text-[10px] uppercase tracking-wide bg-stone-100 text-stone-700 rounded-full px-2 py-0.5">
                           {classifyRelationship(selected)}
                         </span>
@@ -4476,44 +4763,45 @@ function RelationshipTracker() {
 
           {selected.stage !== 'Ended' && (() => {
             const quiet = daysQuiet(selected);
-            const next = (selected.dates || []).filter(d => d.status === 'Upcoming' && d.date >= TODAY()).sort((a, b) => a.date.localeCompare(b.date))[0];
+            const next = (selected.dates || []).filter(d => d.status === 'Upcoming' && d.date >= TODAY())
+              .sort((a, b) => a.date.localeCompare(b.date))[0];
             return (
-              <div className="bg-white border border-stone-200 rounded-lg p-3 mb-4 text-sm">
+              <div className="space-y-2 mb-4">
                 {next ? (
-                  <span className="text-emerald-800 font-medium">
-                    Next date {formatDayLabel(next.date)} — {next.location || 'venue TBC'}
+                  <div className="bg-white border border-emerald-200 rounded-lg p-3">
+                    <div className="text-sm text-emerald-800 font-medium">
+                      Next date {formatDayLabel(next.date)}
+                    </div>
+                    <div className="text-sm text-stone-600 mt-0.5">{next.location || 'Venue to be decided'}</div>
                     <button onClick={() => addDateToCalendar(next, 'google')}
-                      className="ml-2 text-xs underline text-stone-600 hover:text-stone-900">Add to calendar</button>
-                  </span>
-                ) : quiet === null ? (
-                  <span className="text-stone-500">No activity logged yet.</span>
+                      className="mt-2 flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100">
+                      <Calendar className="w-3.5 h-3.5" /> Add to calendar
+                    </button>
+                  </div>
                 ) : (
-                  <span className={quiet >= 21 ? 'text-red-700' : quiet >= 7 ? 'text-amber-700' : 'text-stone-600'}>
-                    Last activity {formatGap(quiet)} ago.
-                  </span>
+                  <div className="bg-white border border-stone-200 rounded-lg p-3">
+                    {quiet === null ? (
+                      <span className="text-sm text-stone-500">No activity logged yet.</span>
+                    ) : (
+                      <span className={`text-sm ${quiet >= 21 ? 'text-red-700' : quiet >= 7 ? 'text-amber-700' : 'text-stone-600'}`}>
+                        Last activity {formatGap(quiet)} ago.
+                      </span>
+                    )}
+                  </div>
                 )}
-                <p className="text-xs text-stone-400 mt-1.5">
-                  Spoke by phone, or saw her, with no chat to import?{' '}
-                  <button onClick={() => setContactNote({})} className="underline text-stone-500 hover:text-stone-800">
-                    Write it up
+
+                <div className="bg-white border border-stone-200 rounded-lg p-3">
+                  <p className="text-xs text-stone-500">
+                    Spoke by phone, or saw her, with no chat to import?
+                  </p>
+                  <button onClick={() => setContactNote({})}
+                    className="mt-2 flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100">
+                    <Pencil className="w-3.5 h-3.5" /> Write it up
                   </button>
-                  {' '}— you can set any date, so old contact can go in too.
-                </p>
+                </div>
               </div>
             );
           })()}
-
-          {looksOver(selected) && (
-            <div className="bg-stone-100 border border-stone-300 rounded-lg p-3 mb-4 flex items-center justify-between gap-3">
-              <p className="text-sm text-stone-700">
-                Nothing for {formatGap(daysQuiet(selected))} and nothing booked. Is this one over?
-              </p>
-              <button onClick={closeOutRelationship}
-                className="shrink-0 text-sm font-medium text-stone-800 border border-stone-400 rounded-md px-2.5 py-1 hover:bg-white">
-                Close it out
-              </button>
-            </div>
-          )}
 
           <StatusPanel
             read={selected.coachRead || null}
@@ -4944,7 +5232,7 @@ function RelationshipTracker() {
                         <div className="mt-1 flex items-center gap-1 text-xs text-stone-500 flex-wrap">
                           <Flag className="w-3 h-3" />
                           <span>
-                            {classifyRelationship(p)}{span !== null ? ' · ' + formatSpan(span) : ''}
+                            {classifyRelationship(p)}{span !== null ? ' · ' + formatSpanDetailed(p) : ''}
                             {p.endReason ? ' · ' + p.endReason : ''}
                             {closure.label ? ' · ' + closure.label.toLowerCase() : ''}
                           </span>
@@ -5344,31 +5632,72 @@ function DuplicateNameModal({ info, onCancel, onOverwrite, onCreateNew }) {
 }
 
 function ChatDateConfirmModal({ info, onCancel, onConfirm }) {
-  const [date, setDate] = useState(TODAY());
   const { payload } = info;
-  const markerText = (payload.markers || []).length ? payload.markers.join(', ') : 'no dated divider';
+  const labels = payload.relativeLabels || [];
+  const floor = payload.earliestCapture || '';
+  // Default to the last date the image is certain about, since the screenshot
+  // cannot have been taken before it.
+  const [date, setDate] = useState(floor && floor <= TODAY() ? floor : TODAY());
+  const tooEarly = floor && date < floor;
+
+  const headline = labels.length
+    ? 'It says ' + labels.slice(0, 2).map(l => '"' + l + '"') .join(' and ') + ' — what date is that?'
+    : 'No date in this chat — when was it taken?';
+
   return (
     <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
       <div className="bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto">
         <div className="flex items-center gap-2 mb-2">
           <Calendar className="w-4 h-4 text-stone-600" />
-          <h3 className="font-serif text-lg">Confirm the date</h3>
+          <h3 className="font-serif text-lg">{headline}</h3>
         </div>
+
         <p className="text-sm text-stone-700">
-          That chat shows <strong>{markerText}</strong>, so the calendar date isn't certain.
-          {` ${payload.sessions.length} session${payload.sessions.length === 1 ? '' : 's'} need a date.`}
+          Give the day you took the screenshot. Words like these are relative to that day, and there is no way to
+          tell it from the image — even when other dates are visible.
         </p>
-        {payload.dateRange && (
-          <p className="text-sm text-stone-700 mt-1">
-            The dated parts of this chat run {formatDateRange(payload.dateRange)}.
+        {floor && (
+          <p className="text-xs text-stone-500 mt-1.5">
+            This chat carries a message dated {formatDayLabel(floor)}, so it cannot have been taken before then.
           </p>
         )}
-        <p className="text-xs text-stone-500 mt-1">The lines will be slotted into the conversation in date order.</p>
-        <input type="date" value={date} onChange={e => setDate(e.target.value)}
+
+        <input type="date" value={date} min={floor || undefined} max={TODAY()}
+          onChange={e => setDate(e.target.value)}
           className="mt-3 w-full border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900" />
+
+        <div className="mt-2 flex gap-1.5 flex-wrap">
+          {[['Today', TODAY()], ['Yesterday', shiftDate(TODAY(), -1)], ['A week ago', shiftDate(TODAY(), -7)]]
+            .filter(([, d]) => !floor || d >= floor)
+            .map(([label, d]) => (
+              <button key={label} onClick={() => setDate(d)}
+                className={`text-xs px-2.5 py-1 rounded-full border ${
+                  date === d ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300'
+                }`}>
+                {label}
+              </button>
+            ))}
+        </div>
+
+        {labels.length > 0 && (
+          <div className="mt-3 border-t border-stone-100 pt-2 space-y-0.5">
+            {labels.slice(0, 5).map((l, i) => (
+              <p key={i} className="text-[11px] text-stone-500">
+                "{l}" → {formatDayLabel(parseDayLabel(l, date) || date)}
+              </p>
+            ))}
+          </div>
+        )}
+        {tooEarly && (
+          <p className="text-xs text-red-700 mt-2">That is before a message already dated in this chat.</p>
+        )}
+
         <div className="mt-4 flex gap-2">
           <button onClick={onCancel} className="flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">Cancel</button>
-          <button onClick={() => onConfirm(date)} className="flex-1 bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800">Save</button>
+          <button onClick={() => onConfirm(date)} disabled={tooEarly}
+            className="flex-1 bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800 disabled:opacity-50">
+            Save
+          </button>
         </div>
       </div>
     </div>
@@ -5979,7 +6308,8 @@ function ConversationSection({ chronology, summary, progress, onAddFiles, onDele
     try {
       await onAddFiles(files);
     } catch (e2) {
-      setErr('Could not read that conversation screenshot.');
+      setErr((e2 && e2.fileName ? e2.fileName + ': ' : '')
+        + (friendlyExtractError(e2) || 'Could not read that conversation screenshot.'));
     }
     setBusy(false);
   }
@@ -6320,10 +6650,11 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
       setPhase('review');
     } catch (err) {
       const msg = String(err && err.message || err);
-      setErrMsg(friendlyExtractError(err)
+      const named = err && err.fileName ? err.fileName + ': ' : '';
+      setErrMsg(named + (friendlyExtractError(err)
         || (/memory|allocat|decode|canvas/i.test(msg)
             ? 'That image was too large for the browser to process. Try splitting the screenshot into two shorter ones.'
-            : 'Could not read that screenshot — ' + msg));
+            : 'Could not read that screenshot — ' + msg)));
       setPhase('error');
     }
   }
@@ -6591,7 +6922,8 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
       setDateValue(TODAY());
       setPhase('review');
     } catch (err) {
-      setErrMsg(friendlyExtractError(err) || 'Could not read that screenshot — ' + String(err && err.message || err));
+      setErrMsg((err && err.fileName ? err.fileName + ': ' : '')
+        + (friendlyExtractError(err) || 'Could not read that screenshot — ' + String(err && err.message || err)));
       setPhase('error');
     }
   }
@@ -6706,14 +7038,29 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
                   {payload.matchedDate ? ' · matched ' + payload.matchedDate : ''}
                 </div>
                 {payload.dateRange && (
-                  <div className="text-xs text-stone-700 mt-1">
+                  <div className={`text-xs mt-1 ${payload.assumedDates ? 'text-amber-700' : 'text-stone-700'}`}>
                     Covers {formatDateRange(payload.dateRange)}
+                    {payload.assumedDates ? ' — assumed from "today", set the capture date below if that is wrong' : ''}
                   </div>
                 )}
                 {!payload.dateRange && (
                   <div className="text-xs text-amber-700 mt-1">
                     No date could be found in this image — set one below or it will be filed under today.
                   </div>
+                )}
+                {payload.dateMarkers && payload.dateMarkers.length > 0 && (
+                  <details className="mt-1">
+                    <summary className="text-[11px] text-stone-400 cursor-pointer">
+                      {payload.dateMarkers.length} date marker{payload.dateMarkers.length === 1 ? '' : 's'} found
+                    </summary>
+                    <ul className="mt-1 space-y-0.5">
+                      {payload.dateMarkers.slice(0, 10).map((m, i) => (
+                        <li key={i} className="text-[11px] text-stone-500">
+                          panel {m.panel}: "{m.label}" → {m.date}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
                 )}
                 {payload.dateEvidence && payload.dateEvidence.length > 0 && (
                   <details className="mt-1">
@@ -8481,6 +8828,34 @@ function relEndYm(person) {
   if (person.stage === 'Ended') return ym(activityRank(person));
   return '';
 }
+
+// Months are too coarse early on: "0 months" or "1 month" says nothing when you
+// are three weeks in. Days come from the real start date, not the month.
+function relStartDate(person) {
+  if (person.dateMet) return person.dateMet;
+  const first = [...(person.conversationDays || []).map(d => d.date), ...(person.dates || []).map(d => d.date)].filter(Boolean).sort()[0];
+  if (first) return first;
+  if (person.relStart) return person.relStart + '-01';
+  return '';
+}
+function relSpanDays(person) {
+  const start = relStartDate(person);
+  if (!start) return null;
+  const endYm = relEndYm(person);
+  const end = person.endDate || (endYm ? endYm + '-28' : TODAY());
+  return Math.max(0, daysBetween(start, end > TODAY() && !endYm ? TODAY() : end));
+}
+
+// Under three months, report the exact days; beyond that, months and years.
+function formatSpanDetailed(person) {
+  const months = relSpanMonths(person);
+  const days = relSpanDays(person);
+  // Judge on actual days, not calendar months: 10 May to 7 August spans three
+  // month boundaries but is still under three months of knowing her.
+  if (days !== null && days < 92) return days + (days === 1 ? ' day' : ' days');
+  if (months !== null) return formatSpan(months);
+  return days !== null ? days + ' days' : '';
+}
 function relSpanMonths(person) {
   const start = relStartYm(person);
   if (!start) return null;
@@ -8666,6 +9041,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 "relativeDayMarkers": array of strings — relative day dividers shown, exactly as printed ("Today", "Yesterday", "Monday"). Empty if all dividers are absolute dates.
 "sessions": array, oldest first, of objects:
   {
+    "panel": integer — the panel number this session begins in.
     "dayLabel": string or null (the divider exactly as printed above this session, e.g. "Today", "14 July"),
     "date": string or null (YYYY-MM-DD. RESOLVE THE DIVIDER — see the dating rules below. Null only if this session has no day information of any kind above it.),
     "summary": string — two or three sentences addressed to him on what this session was about and how it went between you and her. Second person throughout. Not a transcript.
@@ -8986,6 +9362,201 @@ function nameSimilarity(a, b) {
 
 // Read one or more chat screenshots into a single payload. Deduplication happens
 // at commit time, once the person it belongs to is known.
+const DATE_SCAN_PROMPT = `These images are consecutive vertical panels of ONE tall screenshot of a chat conversation, top to bottom. Your ONLY job is to find dates. Ignore the content of the messages entirely.
+
+Look at every panel and report every piece of date information you can see:
+- Day dividers between messages ("Today", "Yesterday", "Monday", "14 July", "14/07/2024", "Sat 3 Aug").
+- Any date printed beside a message or in a timestamp row.
+- A "you matched on" or "you connected on" banner.
+- The phone's status bar date, if the capture includes it.
+- A date written inside a message ("see you on the 14th").
+
+Respond with ONLY a JSON object, no other text:
+{
+"markers": array of objects {"panel": integer (which panel it appears in), "label": string (exactly as printed), "date": string or null (YYYY-MM-DD if you can work it out with certainty)},
+"yearEvidence": string or null — any year you can see anywhere in the image, as printed.
+}
+Report markers in the order they appear down the image. If a panel has no date information, do not invent one. An empty markers array is a valid answer, but look properly first — most chat screenshots contain at least one.`;
+
+// Dates get their own pass over the whole image. Reading in sections means a
+// section that happens to contain no divider has nothing to date itself with,
+// which is why so much was landing on today.
+async function scanForDates(imgEl, plans, onProgress) {
+  if (onProgress) onProgress('Looking for dates…');
+  const markers = [];
+  let yearEvidence = null;
+  const CHUNK = 6; // small output, so more panels per call
+  for (let i = 0; i < plans.length; i += CHUNK) {
+    const chunk = plans.slice(i, i + CHUNK);
+    const blocks = [];
+    chunk.forEach(plan => {
+      blocks.push({
+        type: 'text',
+        text: 'Panel ' + plan.index + ':'
+      });
+      blocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/jpeg',
+          data: renderPanel(imgEl, plan)
+        }
+      });
+    });
+    blocks.push({
+      type: 'text',
+      text: DATE_SCAN_PROMPT
+    });
+    try {
+      const res = await callVision(blocks, 1500);
+      (Array.isArray(res && res.markers) ? res.markers : []).forEach(mk => {
+        if (!mk || !mk.label) return;
+        markers.push({
+          panel: Number(mk.panel) || chunk[0].index,
+          label: String(mk.label).trim(),
+          date: mk.date || null
+        });
+      });
+      if (!yearEvidence && res && res.yearEvidence) yearEvidence = String(res.yearEvidence);
+    } catch (e) {/* a missed section just means fewer markers */} finally {
+      blocks.forEach(b => {
+        if (b.type === 'image') b.source.data = null;
+      });
+    }
+  }
+  return {
+    markers,
+    yearEvidence
+  };
+}
+
+// Turn the raw markers into dated anchors, resolving relative labels against
+// their neighbours rather than against today.
+function resolveMarkers(scan, captureDate) {
+  const markers = (scan.markers || []).map(m => ({
+    ...m,
+    kind: labelKind(m.label)
+  }));
+  const year = (scan.yearEvidence || '').match(/(19|20)\d{2}/);
+  const capture = captureDate || TODAY();
+
+  // 1. Certain on their own.
+  markers.forEach(m => {
+    if (m.date && /^\d{4}-\d{2}-\d{2}$/.test(m.date) && m.kind === 'absolute') {
+      m.absolute = true;
+      return;
+    }
+    if (m.kind === 'absolute') {
+      m.date = parseDayLabel(m.label, TODAY());
+      m.absolute = !!m.date;
+      return;
+    }
+    m.date = null;
+  });
+
+  // 2. A bare day and month needs a year, not a capture date. Take one from the
+  //    image if there is one, otherwise from the nearest dated neighbour.
+  markers.forEach((m, i) => {
+    if (m.date || m.kind !== 'daymonth') return;
+    if (year) {
+      const withYear = parseDayLabel(m.label + ' ' + year[0], TODAY());
+      if (withYear) {
+        m.date = withYear;
+        m.absolute = true;
+        return;
+      }
+    }
+    let near = null;
+    for (let j = i - 1; j >= 0; j--) if (markers[j].date) {
+      near = markers[j].date;
+      break;
+    }
+    if (!near) for (let j = i + 1; j < markers.length; j++) if (markers[j].date) {
+      near = markers[j].date;
+      break;
+    }
+    m.date = parseDayLabel(m.label, near || capture);
+    m.absolute = !!near;
+  });
+
+  // 3. Relative labels are read against the capture day — never against an
+  //    absolute date elsewhere in the image, which says nothing about when the
+  //    screenshot was taken.
+  markers.forEach((m, i) => {
+    if (m.date || m.kind !== 'relative') return;
+    m.needsCapture = true;
+    let before = null;
+    for (let j = i - 1; j >= 0; j--) if (markers[j].date) {
+      before = markers[j].date;
+      break;
+    }
+    if (/today|tonight|yesterday|tomorrow/i.test(m.label)) {
+      m.date = parseDayLabel(m.label, capture);
+    } else {
+      // A bare weekday sits after the date above it, but within the week ending
+      // on the capture day.
+      m.date = before ? parseDayLabel(m.label, before, true) : parseDayLabel(m.label, capture);
+    }
+    m.assumed = !captureDate;
+  });
+
+  // 4. Anything still undated takes a neighbour.
+  markers.forEach((m, i) => {
+    if (m.date) return;
+    for (let j = i - 1; j >= 0; j--) if (markers[j].date) {
+      m.date = markers[j].date;
+      m.assumed = true;
+      return;
+    }
+    for (let j = i + 1; j < markers.length; j++) if (markers[j].date) {
+      m.date = markers[j].date;
+      m.assumed = true;
+      return;
+    }
+    m.date = capture;
+    m.assumed = !captureDate;
+  });
+  return markers.filter(m => m.date).sort((a, b) => a.panel - b.panel);
+}
+
+// Once he says which day the screenshot was taken, every relative marker is
+// recalculated against it.
+function reanchorMarkers(markers, captureDate) {
+  if (!captureDate) return markers || [];
+  const out = (markers || []).map(m => ({
+    ...m
+  }));
+  out.forEach((m, i) => {
+    if (!m.needsCapture && !m.assumed) return;
+    if (/today|tonight|yesterday|tomorrow/i.test(m.label || '')) {
+      m.date = parseDayLabel(m.label, captureDate) || captureDate;
+    } else {
+      let before = null;
+      for (let j = i - 1; j >= 0; j--) if (out[j].date && !out[j].needsCapture) {
+        before = out[j].date;
+        break;
+      }
+      m.date = (before ? parseDayLabel(m.label, before, true) : parseDayLabel(m.label, captureDate)) || captureDate;
+    }
+    m.assumed = false;
+  });
+  return out.sort((a, b) => a.panel - b.panel);
+}
+
+// The latest date the image is certain about — the capture cannot be before it.
+function earliestPossibleCapture(markers) {
+  const abs = (markers || []).filter(m => m.absolute && m.date).map(m => m.date).sort();
+  return abs.length ? abs[abs.length - 1] : '';
+}
+
+// The date for a session is the last marker at or above where it starts.
+function dateForPanel(markers, panel) {
+  let found = null;
+  markers.forEach(m => {
+    if (m.panel <= panel) found = m.date;
+  });
+  return found || (markers.length ? markers[0].date : null);
+}
 async function extractChatPayload(files, onProgress) {
   let sessions = [],
     summaryParts = [],
@@ -9005,6 +9576,7 @@ async function extractChatPayload(files, onProgress) {
     missing: []
   };
   let dateEvidence = [];
+  let dateMarkers = [];
   let n = 0;
   for (const file of files) {
     n += 1;
@@ -9015,8 +9587,18 @@ async function extractChatPayload(files, onProgress) {
       day: 'numeric',
       month: 'long',
       year: 'numeric'
-    }) + ' (' + TODAY() + '). Resolve every divider against that.';
-    const fields = await extractFromScreenshot(file, dated, 8000, mergeChatResults, onProgress, w => imageWarnings.push(w));
+    }) + ' (' + TODAY() + '). Use it only to resolve relative dividers such as "Today" or a weekday name. ' + 'Never date a session as today unless a divider actually says so — if you cannot tell, return null and leave it.';
+    let fields;
+    try {
+      fields = await extractFromScreenshotWithDates(file, dated, 8000, mergeChatResults, onProgress, w => imageWarnings.push(w), m => {
+        dateMarkers = dateMarkers.concat(m);
+      });
+    } catch (e) {
+      // Say which image failed — with several selected, "it failed" is useless.
+      e.fileName = file && file.name || 'image ' + n;
+      e.message = String(e.message || e) + ' (' + e.fileName + ')';
+      throw e;
+    }
     if (fields.summary) summaryParts.push(fields.summary);
     if (Array.isArray(fields.sessions)) sessions = sessions.concat(fields.sessions);
     if (Array.isArray(fields.phoneNumbers)) phoneNumbers = phoneNumbers.concat(fields.phoneNumbers);
@@ -9049,12 +9631,19 @@ async function extractChatPayload(files, onProgress) {
     imageWarnings,
     coverage,
     dateEvidence,
-    dateRange: sessionDateRange(datedSessions(sessions.filter(Boolean), null)),
+    dateMarkers,
+    dateRange: sessionDateRange(datedSessions(sessions.filter(Boolean), null, dateMarkers)),
     markers: Array.from(new Set(markers.filter(Boolean))),
     lowConfidence,
     totalPoints,
     // Only ask him if a session is still undated after local parsing.
-    needsDate: sessions.length > 0 && sessions.some(ses => ses && !ses.date && !parseDayLabel(ses.dayLabel, TODAY()))
+    // A relative divider can never be resolved from the image alone, however many
+    // absolute dates sit alongside it: "Today" is whenever the screenshot was
+    // taken. So it is always asked, and only skipped when nothing relative exists.
+    needsDate: sessions.length > 0 && (dateMarkers.some(m => m.needsCapture) || sessions.some(ses => ses && needsCaptureDate(ses.dayLabel)) || !dateMarkers.length),
+    relativeLabels: Array.from(new Set(dateMarkers.filter(m => m.needsCapture).map(m => m.label).concat(sessions.filter(ses => ses && needsCaptureDate(ses.dayLabel)).map(ses => ses.dayLabel)))).filter(Boolean),
+    earliestCapture: earliestPossibleCapture(dateMarkers),
+    assumedDates: dateMarkers.some(m => m.assumed)
   };
 }
 
@@ -9114,27 +9703,57 @@ function labelIsAbsolute(label) {
   const t = String(label || '').toLowerCase();
   return /\b(19|20)\d{2}\b/.test(t);
 }
-function datedSessions(sessions, fallbackDate) {
+
+// What kind of date information is this label, and what does it need to resolve?
+//   absolute  — carries a year: certain on its own
+//   daymonth  — "14 July", "14/07": needs a year, not a capture date
+//   relative  — "Today", "Yesterday", a bare weekday: only means anything
+//               relative to the day the screenshot was taken
+function labelKind(label) {
+  const t = String(label || '').trim().toLowerCase();
+  if (!t) return 'unknown';
+  if (labelIsAbsolute(t)) return 'absolute';
+  if (/today|tonight|yesterday|tomorrow/.test(t)) return 'relative';
+  const isWeekday = WEEKDAYS.some(d => t.includes(d.slice(0, 3)));
+  const hasDayNumber = /\d/.test(t);
+  if (isWeekday && !hasDayNumber) return 'relative';
+  if (MONTHS.some(m => t.includes(m.slice(0, 3))) || /\d{1,2}[\/.\-]\d{1,2}/.test(t)) return 'daymonth';
+  return 'unknown';
+}
+
+// Anything that can only be read against the capture day.
+function needsCaptureDate(label) {
+  return labelKind(label) === 'relative';
+}
+function datedSessions(sessions, fallbackDate, markers) {
   const list = (sessions || []).filter(Boolean).map(ses => ({
     ...ses
   }));
+  const marks = (markers || []).filter(m => m && m.date);
 
-  // 1. Trust what the model dated, and any label carrying a year.
+  // 1. Trust an explicit date, and any label carrying a year.
   list.forEach(ses => {
     if (!ses.date && labelIsAbsolute(ses.dayLabel)) ses.date = parseDayLabel(ses.dayLabel, TODAY());
   });
+
+  // 2. The dedicated date scan covers the whole image, so it can date a session
+  //    whose own section contained no divider at all.
+  if (marks.length) {
+    list.forEach(ses => {
+      if (ses.date) return;
+      const panel = Number(ses.panel);
+      if (Number.isFinite(panel)) ses.date = dateForPanel(marks, panel);
+    });
+  }
   const anchorFor = i => {
     for (let j = i - 1; j >= 0; j--) if (list[j].date) return list[j].date;
     for (let j = i + 1; j < list.length; j++) if (list[j].date) return list[j].date;
     return null;
   };
-
-  // 2. Resolve relative labels against the nearest dated session, not today —
-  //    otherwise "Monday" in a chat from 2024 lands in this week.
-  // The most recent absolute date in the image stands in for "today" when the
-  // screenshot itself is old.
-  const absolutes = list.map(x => x.date).filter(Boolean).sort();
+  const absolutes = list.map(x => x.date).filter(Boolean).sort().concat(marks.map(m => m.date)).sort();
   const latestAbsolute = absolutes.length ? absolutes[absolutes.length - 1] : null;
+
+  // 3. Relative labels resolve against the dates around them.
   list.forEach((ses, i) => {
     if (ses.date || !ses.dayLabel) return;
     let before = null;
@@ -9142,25 +9761,23 @@ function datedSessions(sessions, fallbackDate) {
       before = list[j].date;
       break;
     }
-    const relativeToNow = /today|tonight|yesterday/i.test(ses.dayLabel);
-    if (relativeToNow) {
+    if (/today|tonight|yesterday/i.test(ses.dayLabel)) {
       const base = latestAbsolute && latestAbsolute < TODAY() ? latestAbsolute : TODAY();
       ses.date = parseDayLabel(ses.dayLabel, base);
       return;
     }
-    // Read forward from the date above it, or back from the one below.
     ses.date = before ? parseDayLabel(ses.dayLabel, before, true) : parseDayLabel(ses.dayLabel, anchorFor(i) || TODAY());
   });
 
-  // 3. Sessions with no label at all sit with their neighbours.
+  // 4. Unlabelled sessions sit with their neighbours.
   list.forEach((ses, i) => {
     if (!ses.date) ses.date = anchorFor(i);
   });
 
-  // 4. Only now fall back to the date he confirmed, or today.
+  // 5. Today is genuinely the last resort now.
   return list.map((ses, i) => ({
     ...ses,
-    date: ses.date || fallbackDate || TODAY(),
+    date: ses.date || fallbackDate || latestAbsolute || TODAY(),
     order: i
   }));
 }
@@ -9295,7 +9912,14 @@ async function runProfileExtraction(files, onProgress) {
       imgEl = await loadImageEl(file);
       panels = sliceImageToPanels(imgEl);
       if (onProgress) onProgress(`Reading image ${fileNo} of ${files.length} (${panels.length} panel${panels.length === 1 ? '' : 's'})…`);
-      const fields = await extractFromPanels(imgEl, panels, PROFILE_EXTRACT_PROMPT, 4000, mergeProfileResults, onProgress);
+      let fields;
+      try {
+        fields = await extractFromPanels(imgEl, panels, PROFILE_EXTRACT_PROMPT, 4000, mergeProfileResults, onProgress);
+      } catch (e) {
+        e.fileName = file && file.name || 'image ' + fileNo;
+        e.message = String(e.message || e) + ' (' + e.fileName + ')';
+        throw e;
+      }
       if (!name && fields.name) name = String(fields.name).trim();
       mergeProfileDrafts(profile, fields);
       const regions = Array.isArray(fields.photoRegions) ? fields.photoRegions : [];
@@ -9722,6 +10346,27 @@ function mergeChatResults(results) {
 
 // Single-image extraction (chat screenshots, date plans) — still panel-sliced so
 // long conversations stay legible.
+// Reads the conversation and scans for dates in one pass over the image, so the
+// bitmap is only decoded once.
+async function extractFromScreenshotWithDates(file, prompt, maxTokens, merge, onProgress, onWarn, onMarkers) {
+  requireApiKey();
+  const imgEl = await loadImageEl(file);
+  if (onWarn) assessScreenshot(imgEl).problems.forEach(onWarn);
+  const plans = sliceImageToPanels(imgEl);
+  try {
+    const scan = await scanForDates(imgEl, plans, onProgress);
+    const markers = resolveMarkers(scan);
+    if (onMarkers) onMarkers(markers);
+    const fields = await extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgress);
+    fields.dateMarkers = markers;
+    return fields;
+  } finally {
+    try {
+      URL.revokeObjectURL(imgEl.src);
+    } catch (e) {}
+    imgEl.src = '';
+  }
+}
 async function extractFromScreenshot(file, prompt, maxTokens, merge, onProgress, onWarn) {
   requireApiKey();
   const imgEl = await loadImageEl(file);
@@ -10655,12 +11300,28 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.8.3';
+const APP_VERSION = '1.11.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '1.11.0',
+  date: '2026-08-08',
+  changes: [['changed', 'A relative divider always prompts now: an absolute date elsewhere in the image says nothing about when the screenshot was taken'], ['changed', 'The prompt asks it plainly — It says "Today" — what date is that?'], ['added', 'Date labels are classified as absolute, day-and-month, or relative, and only relative ones need you'], ['added', 'The capture date cannot be set earlier than a message already dated in the chat'], ['added', 'Quick options for today, yesterday and a week ago, with a live preview of what each divider becomes']]
+}, {
+  version: '1.10.1',
+  date: '2026-08-08',
+  changes: [['fixed', '"Today" in a screenshot means the day it was captured, not the day it was imported — the app was treating them as the same'], ['added', 'When a chat is dated only by relative dividers, it asks when the screenshot was taken and works everything out from that'], ['added', 'The confirmation dialog previews what each divider becomes as you change the date'], ['changed', 'A chat with an absolute date anywhere in the image is no longer questioned']]
+}, {
+  version: '1.10.0',
+  date: '2026-08-07',
+  changes: [['fixed', 'Dates defaulted to today far too often: a section containing no divider had nothing to date itself with'], ['added', 'A dedicated pass scans the whole image for dates before the conversation is read, and every session takes the date of the marker above it'], ['added', 'A year seen anywhere in the image is applied to bare day-and-month dividers'], ['changed', 'The reader is told never to date something as today unless a divider says so'], ['added', 'Import lists the date markers it found, so a wrong date is visible before saving']]
+}, {
+  version: '1.9.0',
+  date: '2026-08-07',
+  changes: [['added', 'A screenshot that cannot be read now names the file it failed on'], ['changed', 'Next date and the write-it-up prompt are separate boxes, with Add to calendar as its own button'], ['changed', 'Relationships under three months show exact days rather than rounded months, keeping the month headline']]
+}, {
   version: '1.8.3',
   date: '2026-08-07',
   changes: [['fixed', 'Sharing an image showed the lock message but nothing after unlocking — the dialog was only mounted on the person page, never the home screen'], ['changed', 'App-wide dialogs are now defined once and shown on every screen, so none can go missing again']]
@@ -11592,7 +12253,8 @@ function RelationshipTracker() {
     };
     setChatImport(null);
     setDateConfirm(null);
-    const incoming = datedSessions(payload.sessions, confirmedDate);
+    const markers = reanchorMarkers(payload.dateMarkers, confirmedDate);
+    const incoming = datedSessions(payload.sessions, confirmedDate, markers);
     const knownKeys = existingPointKeys(target.conversationLog);
     const {
       days,
@@ -11954,7 +12616,7 @@ function RelationshipTracker() {
         className: "font-medium text-stone-800"
       }, fmt(start), " – ", end ? fmt(end) : 'now'), span !== null && /*#__PURE__*/React.createElement("span", {
         className: "text-stone-500"
-      }, "· ", formatSpan(span)), /*#__PURE__*/React.createElement("span", {
+      }, "· ", formatSpanDetailed(selected)), /*#__PURE__*/React.createElement("span", {
         className: "text-[10px] uppercase tracking-wide bg-stone-100 text-stone-700 rounded-full px-2 py-0.5"
       }, classifyRelationship(selected)), closure.closed && /*#__PURE__*/React.createElement("span", {
         className: "text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5"
@@ -12014,30 +12676,35 @@ function RelationshipTracker() {
       const quiet = daysQuiet(selected);
       const next = (selected.dates || []).filter(d => d.status === 'Upcoming' && d.date >= TODAY()).sort((a, b) => a.date.localeCompare(b.date))[0];
       return /*#__PURE__*/React.createElement("div", {
-        className: "bg-white border border-stone-200 rounded-lg p-3 mb-4 text-sm"
-      }, next ? /*#__PURE__*/React.createElement("span", {
-        className: "text-emerald-800 font-medium"
-      }, "Next date ", formatDayLabel(next.date), " — ", next.location || 'venue TBC', /*#__PURE__*/React.createElement("button", {
+        className: "space-y-2 mb-4"
+      }, next ? /*#__PURE__*/React.createElement("div", {
+        className: "bg-white border border-emerald-200 rounded-lg p-3"
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "text-sm text-emerald-800 font-medium"
+      }, "Next date ", formatDayLabel(next.date)), /*#__PURE__*/React.createElement("div", {
+        className: "text-sm text-stone-600 mt-0.5"
+      }, next.location || 'Venue to be decided'), /*#__PURE__*/React.createElement("button", {
         onClick: () => addDateToCalendar(next, 'google'),
-        className: "ml-2 text-xs underline text-stone-600 hover:text-stone-900"
-      }, "Add to calendar")) : quiet === null ? /*#__PURE__*/React.createElement("span", {
-        className: "text-stone-500"
+        className: "mt-2 flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100"
+      }, /*#__PURE__*/React.createElement(Calendar, {
+        className: "w-3.5 h-3.5"
+      }), " Add to calendar")) : /*#__PURE__*/React.createElement("div", {
+        className: "bg-white border border-stone-200 rounded-lg p-3"
+      }, quiet === null ? /*#__PURE__*/React.createElement("span", {
+        className: "text-sm text-stone-500"
       }, "No activity logged yet.") : /*#__PURE__*/React.createElement("span", {
-        className: quiet >= 21 ? 'text-red-700' : quiet >= 7 ? 'text-amber-700' : 'text-stone-600'
-      }, "Last activity ", formatGap(quiet), " ago."), /*#__PURE__*/React.createElement("p", {
-        className: "text-xs text-stone-400 mt-1.5"
-      }, "Spoke by phone, or saw her, with no chat to import?", ' ', /*#__PURE__*/React.createElement("button", {
+        className: `text-sm ${quiet >= 21 ? 'text-red-700' : quiet >= 7 ? 'text-amber-700' : 'text-stone-600'}`
+      }, "Last activity ", formatGap(quiet), " ago.")), /*#__PURE__*/React.createElement("div", {
+        className: "bg-white border border-stone-200 rounded-lg p-3"
+      }, /*#__PURE__*/React.createElement("p", {
+        className: "text-xs text-stone-500"
+      }, "Spoke by phone, or saw her, with no chat to import?"), /*#__PURE__*/React.createElement("button", {
         onClick: () => setContactNote({}),
-        className: "underline text-stone-500 hover:text-stone-800"
-      }, "Write it up"), ' ', "— you can set any date, so old contact can go in too."));
-    })(), looksOver(selected) && /*#__PURE__*/React.createElement("div", {
-      className: "bg-stone-100 border border-stone-300 rounded-lg p-3 mb-4 flex items-center justify-between gap-3"
-    }, /*#__PURE__*/React.createElement("p", {
-      className: "text-sm text-stone-700"
-    }, "Nothing for ", formatGap(daysQuiet(selected)), " and nothing booked. Is this one over?"), /*#__PURE__*/React.createElement("button", {
-      onClick: closeOutRelationship,
-      className: "shrink-0 text-sm font-medium text-stone-800 border border-stone-400 rounded-md px-2.5 py-1 hover:bg-white"
-    }, "Close it out")), /*#__PURE__*/React.createElement(StatusPanel, {
+        className: "mt-2 flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100"
+      }, /*#__PURE__*/React.createElement(Pencil, {
+        className: "w-3.5 h-3.5"
+      }), " Write it up")));
+    })(), /*#__PURE__*/React.createElement(StatusPanel, {
       read: selected.coachRead || null,
       busy: coachBusy,
       error: coachError,
@@ -12457,7 +13124,7 @@ function RelationshipTracker() {
         className: "mt-1 flex items-center gap-1 text-xs text-stone-500 flex-wrap"
       }, /*#__PURE__*/React.createElement(Flag, {
         className: "w-3 h-3"
-      }), /*#__PURE__*/React.createElement("span", null, classifyRelationship(p), span !== null ? ' · ' + formatSpan(span) : '', p.endReason ? ' · ' + p.endReason : '', closure.label ? ' · ' + closure.label.toLowerCase() : ''));
+      }), /*#__PURE__*/React.createElement("span", null, classifyRelationship(p), span !== null ? ' · ' + formatSpanDetailed(p) : '', p.endReason ? ' · ' + p.endReason : '', closure.label ? ' · ' + closure.label.toLowerCase() : ''));
     })())), /*#__PURE__*/React.createElement(ChevronRight, {
       className: "w-4 h-4 text-stone-400 shrink-0 mt-1"
     })), p.coachRead && p.stage !== 'Ended' && /*#__PURE__*/React.createElement("div", {
@@ -13027,11 +13694,16 @@ function ChatDateConfirmModal({
   onCancel,
   onConfirm
 }) {
-  const [date, setDate] = useState(TODAY());
   const {
     payload
   } = info;
-  const markerText = (payload.markers || []).length ? payload.markers.join(', ') : 'no dated divider';
+  const labels = payload.relativeLabels || [];
+  const floor = payload.earliestCapture || '';
+  // Default to the last date the image is certain about, since the screenshot
+  // cannot have been taken before it.
+  const [date, setDate] = useState(floor && floor <= TODAY() ? floor : TODAY());
+  const tooEarly = floor && date < floor;
+  const headline = labels.length ? 'It says ' + labels.slice(0, 2).map(l => '"' + l + '"').join(' and ') + ' — what date is that?' : 'No date in this chat — when was it taken?';
   return /*#__PURE__*/React.createElement("div", {
     className: "fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4"
   }, /*#__PURE__*/React.createElement("div", {
@@ -13042,25 +13714,39 @@ function ChatDateConfirmModal({
     className: "w-4 h-4 text-stone-600"
   }), /*#__PURE__*/React.createElement("h3", {
     className: "font-serif text-lg"
-  }, "Confirm the date")), /*#__PURE__*/React.createElement("p", {
+  }, headline)), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-700"
-  }, "That chat shows ", /*#__PURE__*/React.createElement("strong", null, markerText), ", so the calendar date isn't certain.", ` ${payload.sessions.length} session${payload.sessions.length === 1 ? '' : 's'} need a date.`), payload.dateRange && /*#__PURE__*/React.createElement("p", {
-    className: "text-sm text-stone-700 mt-1"
-  }, "The dated parts of this chat run ", formatDateRange(payload.dateRange), "."), /*#__PURE__*/React.createElement("p", {
-    className: "text-xs text-stone-500 mt-1"
-  }, "The lines will be slotted into the conversation in date order."), /*#__PURE__*/React.createElement("input", {
+  }, "Give the day you took the screenshot. Words like these are relative to that day, and there is no way to tell it from the image — even when other dates are visible."), floor && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-500 mt-1.5"
+  }, "This chat carries a message dated ", formatDayLabel(floor), ", so it cannot have been taken before then."), /*#__PURE__*/React.createElement("input", {
     type: "date",
     value: date,
+    min: floor || undefined,
+    max: TODAY(),
     onChange: e => setDate(e.target.value),
     className: "mt-3 w-full border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900"
   }), /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 flex gap-1.5 flex-wrap"
+  }, [['Today', TODAY()], ['Yesterday', shiftDate(TODAY(), -1)], ['A week ago', shiftDate(TODAY(), -7)]].filter(([, d]) => !floor || d >= floor).map(([label, d]) => /*#__PURE__*/React.createElement("button", {
+    key: label,
+    onClick: () => setDate(d),
+    className: `text-xs px-2.5 py-1 rounded-full border ${date === d ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300'}`
+  }, label))), labels.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "mt-3 border-t border-stone-100 pt-2 space-y-0.5"
+  }, labels.slice(0, 5).map((l, i) => /*#__PURE__*/React.createElement("p", {
+    key: i,
+    className: "text-[11px] text-stone-500"
+  }, "\"", l, "\" → ", formatDayLabel(parseDayLabel(l, date) || date)))), tooEarly && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-red-700 mt-2"
+  }, "That is before a message already dated in this chat."), /*#__PURE__*/React.createElement("div", {
     className: "mt-4 flex gap-2"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: onCancel,
     className: "flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
   }, "Cancel"), /*#__PURE__*/React.createElement("button", {
     onClick: () => onConfirm(date),
-    className: "flex-1 bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800"
+    disabled: tooEarly,
+    className: "flex-1 bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800 disabled:opacity-50"
   }, "Save"))));
 }
 function ChatMismatchModal({
@@ -13866,7 +14552,7 @@ function ConversationSection({
     try {
       await onAddFiles(files);
     } catch (e2) {
-      setErr('Could not read that conversation screenshot.');
+      setErr((e2 && e2.fileName ? e2.fileName + ': ' : '') + (friendlyExtractError(e2) || 'Could not read that conversation screenshot.'));
     }
     setBusy(false);
   }
@@ -14223,7 +14909,8 @@ function ProfileImportModal({
       setPhase('review');
     } catch (err) {
       const msg = String(err && err.message || err);
-      setErrMsg(friendlyExtractError(err) || (/memory|allocat|decode|canvas/i.test(msg) ? 'That image was too large for the browser to process. Try splitting the screenshot into two shorter ones.' : 'Could not read that screenshot — ' + msg));
+      const named = err && err.fileName ? err.fileName + ': ' : '';
+      setErrMsg(named + (friendlyExtractError(err) || (/memory|allocat|decode|canvas/i.test(msg) ? 'That image was too large for the browser to process. Try splitting the screenshot into two shorter ones.' : 'Could not read that screenshot — ' + msg)));
       setPhase('error');
     }
   }
@@ -14574,7 +15261,7 @@ function ChatImportModal({
       setDateValue(TODAY());
       setPhase('review');
     } catch (err) {
-      setErrMsg(friendlyExtractError(err) || 'Could not read that screenshot — ' + String(err && err.message || err));
+      setErrMsg((err && err.fileName ? err.fileName + ': ' : '') + (friendlyExtractError(err) || 'Could not read that screenshot — ' + String(err && err.message || err)));
       setPhase('error');
     }
   }
@@ -14692,10 +15379,19 @@ function ChatImportModal({
   }, /*#__PURE__*/React.createElement("strong", null, payload.contactName || 'No name found'), payload.appName ? ' · ' + payload.appName : ''), /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-stone-500 mt-0.5"
   }, payload.totalPoints, " line", payload.totalPoints === 1 ? '' : 's', " across ", payload.sessions.length, " day", payload.sessions.length === 1 ? '' : 's', payload.matchedDate ? ' · matched ' + payload.matchedDate : ''), payload.dateRange && /*#__PURE__*/React.createElement("div", {
-    className: "text-xs text-stone-700 mt-1"
-  }, "Covers ", formatDateRange(payload.dateRange)), !payload.dateRange && /*#__PURE__*/React.createElement("div", {
+    className: `text-xs mt-1 ${payload.assumedDates ? 'text-amber-700' : 'text-stone-700'}`
+  }, "Covers ", formatDateRange(payload.dateRange), payload.assumedDates ? ' — assumed from "today", set the capture date below if that is wrong' : ''), !payload.dateRange && /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-amber-700 mt-1"
-  }, "No date could be found in this image — set one below or it will be filed under today."), payload.dateEvidence && payload.dateEvidence.length > 0 && /*#__PURE__*/React.createElement("details", {
+  }, "No date could be found in this image — set one below or it will be filed under today."), payload.dateMarkers && payload.dateMarkers.length > 0 && /*#__PURE__*/React.createElement("details", {
+    className: "mt-1"
+  }, /*#__PURE__*/React.createElement("summary", {
+    className: "text-[11px] text-stone-400 cursor-pointer"
+  }, payload.dateMarkers.length, " date marker", payload.dateMarkers.length === 1 ? '' : 's', " found"), /*#__PURE__*/React.createElement("ul", {
+    className: "mt-1 space-y-0.5"
+  }, payload.dateMarkers.slice(0, 10).map((m, i) => /*#__PURE__*/React.createElement("li", {
+    key: i,
+    className: "text-[11px] text-stone-500"
+  }, "panel ", m.panel, ": \"", m.label, "\" → ", m.date)))), payload.dateEvidence && payload.dateEvidence.length > 0 && /*#__PURE__*/React.createElement("details", {
     className: "mt-1"
   }, /*#__PURE__*/React.createElement("summary", {
     className: "text-[11px] text-stone-400 cursor-pointer"
