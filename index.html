@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
-<title>Relationship Tracker</title>
+<title>Spinning Plates</title>
 <link rel="icon" href="data:,">
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#1c1917">
@@ -355,6 +355,7 @@ const Flag = makeIcon(<><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-
 const Download = makeIcon(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>);
 const Upload = makeIcon(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></>);
 const Phone = makeIcon(<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.7A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.7a2 2 0 0 1-.5 2.1L8 9.7a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.7.6a2 2 0 0 1 1.7 2z" />);
+const TrendingUp = makeIcon(<><polyline points="22 7 13.5 15.5 8.5 10.5 2 17" /><polyline points="16 7 22 7 22 13" /></>);
 const Camera = makeIcon(<><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></>);
 const Settings = makeIcon(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>);
 const { useState, useEffect, useMemo } = React;
@@ -410,7 +411,7 @@ const BUILD_STAMP = '2026-08-07 21:52 IST';
 // Gist's own revision history doubles as versioned backups.
 
 const GIST_FILE = 'relationship-tracker-data.json';
-const GIST_TAG = 'relationship-tracker: private data store (do not edit by hand)';
+const GIST_TAG = 'Spinning Plates: private data store (do not edit by hand)';
 
 const Sync = {
   token() { return Local.get('rt:gh-token') || ''; },
@@ -818,7 +819,7 @@ Ignore anything neither of you actually said: encryption notices, "missed voice 
 
 Respond with ONLY a JSON object, no other text, no markdown fences:
 {
-"summary": string — two or three sentences addressed to him on what this exchange was about and how it went between you and her. For example: "You opened about her hiking photo and she came back warmly, though she kept it brief." Never write about him in the third person.
+"summary": string — ONE short sentence under 25 words, addressed to you, on what this exchange amounted to. Always "you" and "she". Example: "You opened about her hiking photo and she came back warmly but briefly."
 "facts": array of short strings — the things worth remembering, written to him: what she revealed about her life, work, family, plans or opinions; anything you agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, compliments and other small talk. Empty array if it was all small talk.
 }
 Work only from the lines given. Do not invent anything. Respond with the JSON object only.`;
@@ -838,6 +839,11 @@ async function summariseDay(day, personName) {
 // Days imported before summaries existed, or any that came back blank.
 function daysNeedingSummary(person) {
   return (person.conversationDays || []).filter(d => d && (d.points || []).length && !(d.summary || '').trim());
+}
+
+// Days logged before facts were split by speaker still show under one heading.
+function dayHasSplitFacts(day) {
+  return !!(day && ((day.sheShared || []).length || (day.iShared || []).length || (day.agreed || []).length));
 }
 
 // Chat happens on the phone; dates happen in the world and leave no trace except
@@ -1360,7 +1366,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
     "panel": integer — the panel number this session begins in.
     "dayLabel": string or null (the divider exactly as printed above this session, e.g. "Today", "14 July"),
     "date": string or null (YYYY-MM-DD. RESOLVE THE DIVIDER — see the dating rules below. Null only if this session has no day information of any kind above it.),
-    "summary": string — two or three sentences addressed to him on what this session was about and how it went between you and her. Second person throughout. Not a transcript.
+    "summary": string — ONE short sentence, addressed to you, on what this exchange amounted to and how it went. Under 25 words. Always "you" and "she" — never "he", "him", "the user", or your name. Example: "You suggested Saturday and she said yes without hesitating." Not a transcript, not a list of topics.
     "facts": array of short strings — the things worth remembering: what she revealed about her life, work, family, plans or opinions; anything agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, "how was your day", compliments and other small talk. Empty array if the session was pure small talk.
     "points": array of {"from": "she" or "me", "point": string, "timeLabel": string or null} — the underlying chronology, one condensed line per meaningful exchange of about 8-15 words, in order. AT MOST 8 PER SESSION: if the day ran longer than that, keep the 8 that matter and let the summary and facts carry the rest. Never let this array make your reply so long that it gets cut off — the summary and facts matter more than the points.
   }
@@ -1853,11 +1859,14 @@ async function extractChatPayload(files, onProgress) {
     needsDate: sessions.length > 0 && (
       dateMarkers.some(m => m.needsCapture)
       || sessions.some(ses => ses && needsCaptureDate(ses.dayLabel))
+      || markers.some(mk => needsCaptureDate(mk))
       || !dateMarkers.length
     ),
+    // Every relative divider seen by either pass, so none is silently resolved.
     relativeLabels: Array.from(new Set(
       dateMarkers.filter(m => m.needsCapture).map(m => m.label)
         .concat(sessions.filter(ses => ses && needsCaptureDate(ses.dayLabel)).map(ses => ses.dayLabel))
+        .concat(markers.filter(mk => needsCaptureDate(mk)))
     )).filter(Boolean),
     earliestCapture: earliestPossibleCapture(dateMarkers),
     assumedDates: dateMarkers.some(m => m.assumed),
@@ -2019,10 +2028,13 @@ function mergeSessions(existingDays, incoming, knownKeys) {
     day.summaries = day.summaries || (day.summary ? [day.summary] : []);
     const sum = String(ses.summary || '').trim();
     if (sum && !day.summaries.some(x => normaliseMsg(x) === normaliseMsg(sum))) day.summaries.push(sum);
-    (ses.facts || []).forEach(f => {
-      const t = String(f || '').trim();
-      if (!t) return;
-      if (!day.facts.some(x => normaliseMsg(x) === normaliseMsg(t))) { day.facts.push(t); addedFacts += 1; }
+    ['facts', 'sheShared', 'iShared', 'agreed'].forEach(k => {
+      day[k] = day[k] || [];
+      (ses[k] || []).forEach(f => {
+        const t = String(f || '').trim();
+        if (!t) return;
+        if (!day[k].some(x => normaliseMsg(x) === normaliseMsg(t))) { day[k].push(t); addedFacts += 1; }
+      });
     });
     (ses.points || []).forEach(p => {
       const text = String((p && p.point) || '').trim();
@@ -2457,10 +2469,19 @@ function mergeChatResults(results) {
         if (ses.summary && !normaliseMsg(prev.summary || '').includes(normaliseMsg(ses.summary).slice(0, 40))) {
           prev.summary = ((prev.summary || '') + ' ' + ses.summary).trim();
         }
-        prev.facts = [...(prev.facts || []), ...(ses.facts || [])];
+        ['facts', 'sheShared', 'iShared', 'agreed'].forEach(k => {
+        prev[k] = [...(prev[k] || []), ...(ses[k] || [])];
+      });
         prev.points = [...(prev.points || []), ...(ses.points || [])];
       } else {
-        byDate[key] = { ...ses, facts: [...(ses.facts || [])], points: [...(ses.points || [])] };
+        byDate[key] = {
+          ...ses,
+          facts: [...(ses.facts || [])],
+          sheShared: [...(ses.sheShared || [])],
+          iShared: [...(ses.iShared || [])],
+          agreed: [...(ses.agreed || [])],
+          points: [...(ses.points || [])],
+        };
         out.sessions.push(byDate[key]);
       }
     });
@@ -2531,30 +2552,69 @@ const stageBadgeClass = {
 
 // ---------- Status read (coach summary at the top of a profile) ----------
 
-const COACH_PROMPT = `You are this man's dating coach. He is in his fifties, established, no time to waste. Write TO HIM, in the second person — "you", "she", "your". Never refer to him as "the user", "he" or "him", and never write about him in the third person. This applies to every field you return, including the per-date notes.
+// ---------- Coaches ----------
+// Which schools the read draws on. Adding one here is all it takes.
 
-YOUR COACHING IS A BLEND OF FIVE SCHOOLS. Use whichever fits the evidence:
-- Doc Love (The System, The Dating Dictionary). INTEREST LEVEL is the core of your reading: her interest in you, 0 to 100, set by her behaviour and not talked into existence. His rules: be a Challenge, not a Wimp; she who cares less controls the relationship; never argue, complain or explain; do not buy her attention with gifts, compliments or long messages; let her invest; if she flakes twice her interest level is your answer; and when it is over, FIDO — forget it, drive on.
+const COACHES = [
+  {
+    key: 'doclove', name: 'Doc Love', note: 'The System — interest level, be a challenge, FIDO',
+    text: 'Doc Love (The System, The Dating Dictionary). INTEREST LEVEL is the core of your reading: her interest in you, 0 to 100, set by her behaviour and not talked into existence. His rules: be a Challenge, not a Wimp; she who cares less controls the relationship; never argue, complain or explain; do not buy her attention with gifts, compliments or long messages; let her invest; if she flakes twice her interest level is your answer; and when it is over, FIDO — forget it, drive on.',
+  },
+  {
+    key: 'bacon', name: 'Dan Bacon', note: 'Confidence and leading the interaction',
+    text: 'Dan Bacon: attraction is created by how you carry yourself, not by seeking approval. Move things forward with confidence rather than asking permission.',
+  },
+  {
+    key: 'gunn', name: 'Gary Gunn', note: 'Natural warmth over technique',
+    text: 'Gary Gunn: warmth and natural conversation over technique. Be a real person she wants to spend an evening with.',
+  },
+  {
+    key: 'rio', name: 'Bobby Rio', note: 'Intrigue and playful tension',
+    text: "Bobby Rio: intrigue and playful tension. Don't hand over everything you think; leave her curious.",
+  },
+  {
+    key: 'taragan', name: 'Orion Taragan', note: 'Relaxed masculine frame',
+    text: 'Orion Taragan: relaxed masculine frame — you are not auditioning, you are deciding whether she suits you.',
+  },
+  {
+    key: 'perel', name: 'Esther Perel', note: 'Desire, honesty and what you each need',
+    text: 'Esther Perel: desire needs space as well as closeness, and honesty about what each of you actually wants beats managing the other person. Useful when something has real potential and the question is how to keep it alive.',
+  },
+];
 
-SCORING INTEREST LEVEL — apply this consistently, because he tracks the number over time:
-  90-100  She makes it effortless. Initiates, replies quickly and at length, asks about you, offers her availability, never cancels, wants the next meeting arranged.
-  70-89   Clearly interested but you are still doing more of the work. She responds well and says yes, but rarely starts things.
-  51-69   Lukewarm. Pleasant, slow, reactive. Says yes vaguely, never proposes anything. This is where most stalled connections sit.
-  31-50   Low. Short replies, long gaps, deflects arrangements, or cancelled without offering another day.
-  0-30    Gone. One-word answers, no reply, or a second flake.
+const DEFAULT_COACHES = ['doclove', 'bacon', 'gunn', 'rio', 'taragan'];
 
-ACTIONS OUTWEIGH WORDS — BUT BEFORE A FIRST DATE, HER MESSAGE BEHAVIOUR IS THE ONLY ACTION AVAILABLE, so read it as action rather than dismissing it:
-- Pre-date, these ARE her actions: how fast she replies, whether she starts conversations herself, whether she asks about you, whether her replies match yours in substance, whether she volunteers her availability, and above all whether she says yes to meeting and then holds the arrangement.
-- Warm, complimentary words with no movement toward meeting are not evidence of interest. Enthusiastic language plus a clear yes to a specific day is.
-- Never raise the score because she said something flattering, or because she says she likes you. Raise it for availability and initiation.
-- If he has not yet asked her out, say so and mark the number provisional — the real test has not been run. Do not score above 85 before you have actually met her; interest that survives no contact with reality is unproven.
-- Once you have met, the actions widen: did she turn up, was she on time, did she want a second, did she make contact afterwards, did she agree quickly to the next one. These outrank anything typed.
-- One cancellation with a specific alternative day offered is not a flake. A cancellation with nothing offered in its place is. Two of those and the answer is settled.
+function selectedCoachKeys() {
+  const raw = Local.get('rt:coaches');
+  if (!raw) return DEFAULT_COACHES;
+  try {
+    const list = JSON.parse(raw);
+    const valid = Array.isArray(list) ? list.filter(k => COACHES.some(c => c.key === k)) : [];
+    return valid.length ? valid : DEFAULT_COACHES;
+  } catch (e) {
+    return DEFAULT_COACHES;
+  }
+}
 
-- Dan Bacon: attraction is created by how you carry yourself, not by seeking approval. Move things forward with confidence rather than asking permission.
-- Gary Gunn: warmth and natural conversation over technique. Be a real person she wants to spend an evening with.
-- Bobby Rio: intrigue and playful tension. Don't hand over everything you think; leave her curious.
-- Orion Taragan: relaxed masculine frame — you are not auditioning, you are deciding whether she suits you.
+function saveCoachKeys(keys) {
+  Local.set('rt:coaches', JSON.stringify(keys));
+}
+
+function selectedCoaches() {
+  const keys = selectedCoachKeys();
+  return COACHES.filter(c => keys.includes(c.key));
+}
+
+const COACH_PROMPT_HEAD = `You are this man's dating coach. He is in his fifties, established, no time to waste. Write TO HIM, in the second person — "you", "she", "your". Never refer to him as "the user", "he" or "him", and never write about him in the third person. This applies to every field you return, including the per-date notes.
+
+__COACH_LIST__
+
+USE HIS SIDE THROUGHOUT, NOT AS AN AFTERTHOUGHT. Where he has recorded his own intention, interest level, attraction, how much he enjoys her company, the logistics and his dealbreakers, that is half the picture. Weave it into the status and the recommendation rather than mentioning it once at the end:
+- Judge the connection against what HE wants, not against some general idea of a good match.
+- Compare the two interest levels explicitly when you have both, and say who is doing the work.
+- If he rates attraction high and compatibility low, or enjoys her company but does not want what she wants, name that tension — it is usually the real question, not her behaviour.
+- Weigh his logistics answers as part of whether this is worth his time.
+- If he has recorded nothing, say plainly that the read is one-sided without it and point him at "Where you stand".
 
 WHAT HE WANTS DECIDES WHAT GOOD LOOKS LIKE. You may be told his intention. Advice must follow it rather than assuming everyone is chasing a wife:
 - Seeing what's there — help him find out quickly: get her in front of him and see whether there is anything in the room.
@@ -2570,7 +2630,8 @@ INTEREST GAP. Where you have both numbers, compare them. Him well above her mean
 
 LOGISTICS ARE PART OF COMPATIBILITY, not an afterthought. Ninety minutes of driving, schedules that never line up, or a life that pulls against his own will kill a promising thing regardless of chemistry — and are worth tolerating for something genuinely good. Weigh what he told you about travel, schedules and fit, and say when the practical picture undermines the romantic one.
 
-RED FLAGS. Name them when you see them, once, without lecturing. The standard ones: still hung up on an ex, cancelling repeatedly, hot then cold, only available at odd hours, evasive about her circumstances, money appearing early, pushing for private contact or platforms too fast, contempt about previous partners, love-bombing, inconsistencies in her story, or pressure that makes him uneasy. Include anything he has clocked himself and take it seriously — he was there. Flag it, say why it matters, and leave the decision to him. He is a grown man having a good time, not a case to be managed.
+FLAGS, GOOD AND BAD. Name what you see, once, without lecturing. Red flags, the standard ones: still hung up on an ex, cancelling repeatedly, hot then cold, only available at odd hours, evasive about her circumstances, money appearing early, pushing for private contact or platforms too fast, contempt about previous partners, love-bombing, inconsistencies in her story, or pressure that makes him uneasy. Include anything he has clocked himself and take it seriously — he was there. Flag it, say why it matters, and leave the decision to him. He is a grown man having a good time, not a case to be managed.
+Green flags matter just as much and are easy to overlook: she asks about him and remembers the answers, she suggests things herself, she is straight about her availability, she holds arrangements, she speaks decently about people who let her down, she is comfortable being pleased to see him. Say so when you see them.
 
 TONE. Lighthearted and dry, like a sharp friend across a pint. He is in his fifties, enjoying his dating life, not out to hurt anyone and not in need of a lecture. No therapy-speak, no solemnity, no moralising — but do not soften a hard truth to be liked. A well-placed joke is fine; a wasted month is not.
 
@@ -2598,7 +2659,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 "relationshipStart": string or null — "YYYY-MM", the month this began, judged from the record: the month you matched, or the first contact you can see. Null only if there is nothing to go on.
 "relationshipEnd": string or null — "YYYY-MM", the month it ended, but ONLY if it is genuinely over: she ended it, you ended it, or it has faded with no contact for months and nothing arranged. Null if it is still live, even if it is going badly. Do not close something down over a fortnight's quiet.
 "isOver": true or false — your judgement on whether this is finished. Be honest rather than hopeful: months of silence with no arrangement is finished, whatever either of you last said.
-"redFlags": array of objects {"flag": string (a few words), "why": string (one sentence on what it tends to mean), "severity": "note" or "watch" or "serious"} — anything worth him seeing, from her behaviour or from what he has clocked himself. Empty array if there is genuinely nothing. Do not invent flags to look thorough.
+"flags": array of objects {"flag": string (a few words), "why": string (one sentence on what it tends to mean), "signal": "green" or "amber" or "red"} — the signals worth him seeing, good and bad. GREEN for genuinely good signs: she initiates, she is straightforward about what she wants, she turns up and is on time, she reschedules herself when something clashes, she is warm about her own life rather than bitter. AMBER for things to watch. RED for the serious ones. Include anything he has clocked himself. List green signals as readily as red ones — a read that only ever finds problems is not an honest read. Empty array only if there is genuinely nothing either way.
 "alignment": string or null — one sentence on whether what he wants and what she is doing point the same way. Null if you do not know his intention.
 "dateNotes": array of objects {"date": "YYYY-MM-DD", "read": string} — one entry for each COMPLETED date in the timeline, in date order. "read" is one or two sentences of YOUR interpretation of that particular meeting: what it tells you about her interest level and where things stood after it. Do not repeat your own notes back at you — you wrote them and can read them. Interpret them instead. If you wrote nothing about a date, say what that silence leaves unknown. Empty array if there are no completed dates.
 "recommendation": string — 2-4 sentences. If it is live, the single next move, why it works and what to avoid. If it is over, the lesson to carry forward: the pattern to watch for, the thing to do differently, or the standard to hold next time. Never suggest contacting a woman it is over with. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him plainly to stop investing.
@@ -2676,7 +2737,12 @@ function buildCoachContext(person, brief) {
     shown.forEach(item => {
       if (item.kind === 'chat') {
         lines.push('  ' + (item.date || 'undated') + ' MESSAGES — ' + (item.day.summary || 'no summary'));
-        if (!brief) (item.day.facts || []).forEach(f => lines.push('      fact: ' + f));
+        if (!brief) {
+          (item.day.sheShared || []).forEach(f => lines.push('      she told you: ' + f));
+          (item.day.iShared || []).forEach(f => lines.push('      you told her: ' + f));
+          (item.day.agreed || []).forEach(f => lines.push('      agreed: ' + f));
+          (item.day.facts || []).forEach(f => lines.push('      noted: ' + f));
+        }
       } else if (item.kind === 'contact') {
         lines.push('  ' + item.date + ' ' + (item.entry.type || 'Contact').toUpperCase()
           + ' — YOUR OWN ACCOUNT (nothing else records this): ' + item.entry.text);
@@ -2761,7 +2827,17 @@ function buildCoachContext(person, brief) {
   return lines.join('\n');
 }
 
+function buildCoachPrompt() {
+  const chosen = selectedCoaches();
+  const list = chosen.length
+    ? 'YOUR COACHING DRAWS ON THESE SCHOOLS. Use whichever fits the evidence:\n'
+      + chosen.map(c => '- ' + c.text).join('\n')
+    : 'Coach from your own judgement, plainly and without jargon.';
+  return COACH_PROMPT_HEAD.replace('__COACH_LIST__', list);
+}
+
 async function generateCoachSummary(person, onProgress) {
+  const COACH_PROMPT = buildCoachPrompt();
   const full = buildCoachContext(person) + '\n\n' + COACH_PROMPT;
   const attempts = [
     { text: full, tokens: 4000, label: null },
@@ -2803,13 +2879,14 @@ async function generateCoachSummary(person, onProgress) {
     status: String(result.status || '').trim(),
     recommendation: String(result.recommendation || '').trim(),
     generatedAt: new Date().toISOString(),
-    redFlags: Array.isArray(result.redFlags)
-      ? result.redFlags.map(f => ({
-          flag: String(f.flag || '').trim(),
-          why: String(f.why || '').trim(),
-          severity: ['note', 'watch', 'serious'].includes(f.severity) ? f.severity : 'note',
-        })).filter(f => f.flag)
-      : [],
+    flags: (Array.isArray(result.flags) ? result.flags : (Array.isArray(result.redFlags) ? result.redFlags : []))
+      .map(f => ({
+        flag: String(f.flag || '').trim(),
+        why: String(f.why || '').trim(),
+        // Older reads used severity; map them onto the scale.
+        signal: ['green', 'amber', 'red'].includes(f.signal) ? f.signal
+          : f.severity === 'serious' ? 'red' : f.severity === 'watch' ? 'amber' : 'amber',
+      })).filter(f => f.flag),
     alignment: String(result.alignment || '').trim(),
     relationshipStart: /^\d{4}-\d{2}$/.test(String(result.relationshipStart || '')) ? result.relationshipStart : '',
     relationshipEnd: /^\d{4}-\d{2}$/.test(String(result.relationshipEnd || '')) ? result.relationshipEnd : '',
@@ -2940,27 +3017,36 @@ function StatusPanel({ read, busy, error, onRefresh, onOpenSettings, myRead }) {
             <p className="text-sm text-stone-800">{read.recommendation}</p>
           </div>
 
-          {(read.redFlags || []).length > 0 && (
+          {(read.flags || []).length > 0 && (
             <div>
               <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-1">
-                Worth knowing — your call
+                Signals — your call
               </div>
               <div className="space-y-1.5">
-                {read.redFlags.map((f, i) => (
-                  <div key={i} className={`rounded-md px-2.5 py-2 border ${
-                    f.severity === 'serious' ? 'bg-red-50 border-red-200'
-                      : f.severity === 'watch' ? 'bg-amber-50 border-amber-200'
-                      : 'bg-stone-50 border-stone-200'
-                  }`}>
-                    <div className={`text-sm font-medium ${
-                      f.severity === 'serious' ? 'text-red-800' : f.severity === 'watch' ? 'text-amber-900' : 'text-stone-800'
-                    }`}>{f.flag}</div>
-                    {f.why && <div className="text-xs text-stone-600 mt-0.5">{f.why}</div>}
-                  </div>
-                ))}
+                {[...read.flags].sort((a, b) => {
+                  const order = { red: 0, amber: 1, green: 2 };
+                  return (order[a.signal] ?? 1) - (order[b.signal] ?? 1);
+                }).map((f, i) => {
+                  const tone = f.signal === 'green'
+                    ? { box: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-800', dot: 'bg-emerald-600', label: 'Green flag' }
+                    : f.signal === 'red'
+                      ? { box: 'bg-red-50 border-red-200', text: 'text-red-800', dot: 'bg-red-600', label: 'Red flag' }
+                      : { box: 'bg-amber-50 border-amber-200', text: 'text-amber-900', dot: 'bg-amber-500', label: 'Worth watching' };
+                  return (
+                    <div key={i} className={`rounded-md px-2.5 py-2 border ${tone.box}`}>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${tone.dot}`} />
+                        <span className={`text-sm font-medium ${tone.text}`}>{f.flag}</span>
+                        <span className="text-[10px] uppercase tracking-wide text-stone-400 ml-auto shrink-0">{tone.label}</span>
+                      </div>
+                      {f.why && <div className="text-xs text-stone-600 mt-0.5 ml-3.5">{f.why}</div>}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
+
           <p className="text-[11px] text-stone-400">Read taken {formatReadStamp(read.generatedAt)}.</p>
         </div>
       )}
@@ -3024,7 +3110,7 @@ const Lock = {
     const cred = await navigator.credentials.create({
       publicKey: {
         challenge,
-        rp: { name: 'Relationship Tracker', id: window.location.hostname },
+        rp: { name: 'Spinning Plates', id: window.location.hostname },
         user: { id: userId, name: label || 'me', displayName: label || 'me' },
         pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
         authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required' },
@@ -3235,7 +3321,7 @@ function googleCalendarUrl(person, entry) {
   const details = [
     entry.activity || '',
     entry.notes ? entry.notes.replace(/From chat import/, '').trim() : '',
-    'Logged in Relationship Tracker.',
+    'Logged in Spinning Plates.',
   ].filter(Boolean).join('\n');
   const params = new URLSearchParams({
     action: 'TEMPLATE',
@@ -3261,7 +3347,7 @@ function icsForDate(person, entry, sequence) {
     'DTEND:' + stampUTC(end),
     'SUMMARY:' + esc(calendarTitle(person, entry)),
     'LOCATION:' + esc(entry.location || ''),
-    'DESCRIPTION:' + esc((entry.notes || '') + (entry.notes ? '\n' : '') + 'Logged in Relationship Tracker.'),
+    'DESCRIPTION:' + esc((entry.notes || '') + (entry.notes ? '\n' : '') + 'Logged in Spinning Plates.'),
     'STATUS:' + (entry.status === 'Cancelled' ? 'CANCELLED' : 'CONFIRMED'),
     'END:VEVENT', 'END:VCALENDAR',
   ].join('\r\n');
@@ -3428,12 +3514,53 @@ function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickMa
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '2.0.4';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '2.0.4', date: '2026-08-08', changes: [
+      ['changed', 'Plates redrawn from the reference: the underside shows as a crescent below the face, giving real depth, with the poles back'],
+      ['changed', 'One long sweep either side, hugging the rim and tapering to a point, instead of short ticks'],
+    ],
+  },
+  {
+    version: '2.0.3', date: '2026-08-08', changes: [
+      ['changed', 'Plates redrawn as dinner plates: a fine well line tracking the rim shows the sloped edge, instead of the record-like hole'],
+      ['changed', 'Spin arcs now taper to a rounded point at each end and sit clear of the plate'],
+    ],
+  },
+  {
+    version: '2.0.2', date: '2026-08-08', changes: [
+      ['changed', 'Icon reworked: two plates instead of three, poles dropped in favour of an inner rim, and curved motion trails to show the spin'],
+      ['added', 'A simplified icon for small sizes — one bolder plate, since fine detail turns to mush below 64px'],
+    ],
+  },
+  {
+    version: '2.0.1', date: '2026-08-08', changes: [
+      ['changed', 'The mark now sets the spinning plates inside the heart outline, keeping both'],
+    ],
+  },
+  {
+    version: '2.0.0', date: '2026-08-08', changes: [
+      ['changed', 'The app is now called Spinning Plates, with a new mark and icon set'],
+      ['added', 'Choose which coaches inform the read, in Settings'],
+      ['added', 'Esther Perel added to the roster'],
+      ['changed', 'Signals are now a green to red scale, with good signs called out as readily as bad'],
+      ['changed', 'Chat records are briefer: one line per day, with facts split into what she told you, what you told her, and what was agreed'],
+      ['changed', 'Your own intention and interest are woven through the read rather than mentioned at the end'],
+      ['changed', 'Header buttons carry labels and spread across the screen on mobile'],
+    ],
+  },
+  {
+    version: '1.11.1', date: '2026-08-08', changes: [
+      ['fixed', '"No dated divider found" still appeared in bulk import even when dates had been identified — that field was reading the old marker list'],
+      ['changed', 'Bulk import asks the same explicit question as the person page, with the same preview and earliest-date limit'],
+      ['changed', 'The date picker defaults to the last date the chat is certain about, rather than to today'],
+    ],
+  },
   {
     version: '1.11.0', date: '2026-08-08', changes: [
       ['changed', 'A relative divider always prompts now: an absolute date elsewhere in the image says nothing about when the screenshot was taken'],
@@ -3770,6 +3897,71 @@ function ChangelogModal({ onClose, sinceVersion }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// The mark: two dinner plates spinning on poles inside a heart. The same
+// construction as the icon files — face, underside crescent for depth, a fine
+// well line, and one long tapering sweep either side.
+function PlatesMark({ className, style }) {
+  const heartPath = (cx, cy, s) => {
+    const pts = [];
+    for (let i = 0; i <= 160; i++) {
+      const t = (2 * Math.PI * i) / 160;
+      const x = cx + 16 * Math.pow(Math.sin(t), 3) * s;
+      const y = cy - (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)) * s;
+      pts.push((i ? 'L' : 'M') + x.toFixed(2) + ' ' + y.toFixed(2));
+    }
+    return pts.join(' ') + ' Z';
+  };
+
+  const taperedArc = (cx, cy, rx, ry, a0, a1, w, steps = 44) => {
+    const inner = [], outer = [];
+    for (let i = 0; i <= steps; i++) {
+      const f = i / steps;
+      const a = ((a0 + (a1 - a0) * f) * Math.PI) / 180;
+      const hw = (w * Math.sin(Math.PI * f)) / 2;
+      const x = cx + rx * Math.cos(a), y = cy + ry * Math.sin(a);
+      const nx = Math.cos(a), ny = Math.sin(a);
+      inner.push([x - nx * hw, y - ny * hw]);
+      outer.push([x + nx * hw, y + ny * hw]);
+    }
+    return inner.concat(outer.reverse())
+      .map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(2) + ' ' + p[1].toFixed(2)).join(' ') + ' Z';
+  };
+
+  const cx = 25, cy = 25, s = 1.32;
+  const bg = 'var(--mark-bg, #f5f5f4)';
+  const plates = [
+    { x: cx - 2.1, y: cy - 4.0, rx: 6.5, ang: 13 },
+    { x: cx + 5.3, y: cy + 2.8, rx: 3.6, ang: -16 },
+  ];
+  const base = cy + 9.2;
+
+  return (
+    <svg viewBox="0 0 50 50" className={className} style={style} role="img" aria-label="Spinning Plates">
+      <path d={heartPath(cx, cy, s)} fill="#dc2626" />
+      <path d={heartPath(cx, cy + 1.5, s * 0.72)} fill={bg} />
+      {plates.map((p, i) => (
+        <line key={'pole' + i} x1={p.x} y1={p.y + p.rx * 0.13} x2={p.x} y2={base}
+          stroke="currentColor" strokeWidth="0.5" opacity="0.55" />
+      ))}
+      {plates.map((p, i) => {
+        const ry = p.rx * 0.30, depth = ry * 0.52;
+        return (
+          <g key={i} transform={`rotate(${p.ang} ${p.x} ${p.y})`}>
+            {[[128, 232], [-52, 52]].map(([a0, a1], n) => (
+              <path key={n} d={taperedArc(p.x, p.y, p.rx * 1.34, ry * 1.34, a0, a1, 0.7)}
+                fill="currentColor" opacity="0.5" />
+            ))}
+            <ellipse cx={p.x} cy={p.y + depth} rx={p.rx} ry={ry} fill="currentColor" opacity="0.45" />
+            <ellipse cx={p.x} cy={p.y} rx={p.rx} ry={ry} fill="currentColor" />
+            <ellipse cx={p.x} cy={p.y} rx={p.rx * 0.60} ry={ry * 0.60}
+              fill="none" stroke={bg} strokeWidth="0.35" opacity="0.5" />
+          </g>
+        );
+      })}
+    </svg>
   );
 }
 
@@ -5060,30 +5252,39 @@ function RelationshipTracker() {
   return (
     <div className="min-h-screen bg-stone-100 text-stone-900">
       <div className="max-w-2xl mx-auto px-4 py-8">
-        <header className="flex flex-wrap items-center justify-between gap-3 mb-6">
-          <div className="flex items-center gap-2 min-w-0">
-            <Heart className="w-5 h-5 text-red-700 shrink-0" strokeWidth={1.75} />
-            <h1 className="text-xl font-serif tracking-tight truncate">Relationship Tracker</h1>
+        <header className="mb-5">
+          <div className="flex items-center gap-2.5 mb-3">
+            <PlatesMark className="w-12 h-12 text-stone-800 shrink-0" style={{ '--mark-bg': '#f5f5f4' }} />
+            <h1 className="text-3xl font-serif tracking-tight leading-none">Spinning Plates</h1>
           </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button onClick={() => setShowSettings(true)} className="p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900" aria-label="Settings" title="Settings">
-              <Settings className="w-4 h-4" />
+
+          <div className="flex items-stretch gap-1.5">
+            <button onClick={startAddPerson}
+              className="flex-1 flex flex-col items-center justify-center gap-0.5 bg-stone-900 text-white rounded-md py-1.5 px-1 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-900">
+              <Plus className="w-4 h-4" />
+              <span className="text-[11px] font-medium leading-tight">Add</span>
             </button>
-            <button onClick={() => setShowChatImport(true)} className="p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900" aria-label="Import chats" title="Import chats">
-              <MessageCircle className="w-4 h-4" />
-            </button>
-            <button onClick={() => setShowProfileImport(true)} className="p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900" aria-label="Import profile" title="Import profile">
+            <button onClick={() => setShowProfileImport(true)}
+              className="flex-1 flex flex-col items-center justify-center gap-0.5 border border-stone-300 text-stone-700 rounded-md py-1.5 px-1 hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900">
               <Camera className="w-4 h-4" />
+              <span className="text-[11px] font-medium leading-tight">Profile</span>
             </button>
-            <button onClick={startAddPerson} className="flex items-center gap-1 bg-stone-900 text-white pl-2 pr-2.5 py-1.5 rounded-md text-sm font-medium hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-900">
-              <Plus className="w-4 h-4" /> Add
+            <button onClick={() => setShowChatImport(true)}
+              className="flex-1 flex flex-col items-center justify-center gap-0.5 border border-stone-300 text-stone-700 rounded-md py-1.5 px-1 hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900">
+              <MessageCircle className="w-4 h-4" />
+              <span className="text-[11px] font-medium leading-tight">Chats</span>
+            </button>
+            <button onClick={() => setShowInsights(true)}
+              className="flex-1 flex flex-col items-center justify-center gap-0.5 border border-stone-300 text-stone-700 rounded-md py-1.5 px-1 hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900">
+              <TrendingUp className="w-4 h-4" />
+              <span className="text-[11px] font-medium leading-tight">Insights</span>
+            </button>
+            <button onClick={() => setShowSettings(true)} aria-label="Settings" title="Settings"
+              className="shrink-0 flex items-center justify-center border border-stone-300 text-stone-700 rounded-md px-2.5 hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900">
+              <Settings className="w-4 h-4" />
             </button>
           </div>
         </header>
-
-        {error && (
-          <div className="mb-4 text-sm text-red-800 bg-red-50 border border-red-200 rounded-md px-3 py-2">{error}</div>
-        )}
 
         {!loading && people.length > 0 && (
           <div className="mb-5 space-y-2">
@@ -5109,10 +5310,6 @@ function RelationshipTracker() {
                   {f}
                 </button>
               ))}
-              <button onClick={() => setShowInsights(true)}
-                className="text-xs px-2.5 py-1 rounded-full border border-stone-300 bg-white text-stone-600 hover:bg-stone-50 ml-auto">
-                Insights
-              </button>
             </div>
           </div>
         )}
@@ -5257,11 +5454,18 @@ function RelationshipTracker() {
                           {intentionLabel(p.myRead.intention)}
                         </span>
                       )}
-                      {(p.coachRead.redFlags || []).length > 0 && (
-                        <span className="text-[10px] font-semibold rounded-full px-2 py-0.5 bg-amber-50 text-amber-800">
-                          {p.coachRead.redFlags.length} flag{p.coachRead.redFlags.length === 1 ? '' : 's'}
-                        </span>
-                      )}
+                      {(p.coachRead.flags || []).length > 0 && (() => {
+                        const reds = p.coachRead.flags.filter(f => f.signal === 'red').length;
+                        const greens = p.coachRead.flags.filter(f => f.signal === 'green').length;
+                        const ambers = p.coachRead.flags.length - reds - greens;
+                        return (
+                          <span className="flex items-center gap-1">
+                            {greens > 0 && <span className="text-[10px] font-semibold rounded-full px-2 py-0.5 bg-emerald-50 text-emerald-800">{greens} green</span>}
+                            {ambers > 0 && <span className="text-[10px] font-semibold rounded-full px-2 py-0.5 bg-amber-50 text-amber-800">{ambers} watch</span>}
+                            {reds > 0 && <span className="text-[10px] font-semibold rounded-full px-2 py-0.5 bg-red-50 text-red-700">{reds} red</span>}
+                          </span>
+                        );
+                      })()}
                       {typeof p.coachRead.interestLevel === 'number' && (
                         <span className={`text-[10px] font-semibold rounded-full px-2 py-0.5 ${
                           p.coachRead.interestLevel >= 70 ? 'bg-emerald-50 text-emerald-800'
@@ -6431,15 +6635,33 @@ function ConversationSection({ chronology, summary, progress, onAddFiles, onDele
 
                     {item.day.summary && <p className="text-sm text-stone-800">{item.day.summary}</p>}
 
-                    {(item.day.facts || []).length > 0 && (
-                      <ul className="mt-2 space-y-1">
-                        {item.day.facts.map((f, n) => (
-                          <li key={n} className="text-sm text-stone-800 flex gap-2">
-                            <span className="text-stone-300 shrink-0">•</span><span>{f}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
+                    {(() => {
+                      const legacy = (item.day.facts || []).filter(f =>
+                        !(item.day.sheShared || []).includes(f) && !(item.day.iShared || []).includes(f) && !(item.day.agreed || []).includes(f));
+                      const groups = [
+                        ['She told you', item.day.sheShared || [], 'text-emerald-700'],
+                        ['You told her', item.day.iShared || [], 'text-stone-500'],
+                        ['Agreed', item.day.agreed || [], 'text-stone-700'],
+                        ['Worth remembering', legacy, 'text-stone-500'],
+                      ].filter(g => g[1].length);
+                      if (!groups.length) return null;
+                      return (
+                        <div className="mt-2 space-y-1.5">
+                          {groups.map(([label, items, colour]) => (
+                            <div key={label}>
+                              <div className={`text-[10px] uppercase tracking-wide ${colour}`}>{label}</div>
+                              <ul className="mt-0.5">
+                                {items.map((f, n) => (
+                                  <li key={n} className="text-sm text-stone-800 flex gap-1.5">
+                                    <span className="text-stone-300 shrink-0">·</span><span>{f}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
 
                     {(item.day.points || []).length > 0 && (
                       <>
@@ -6919,7 +7141,7 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
       setMode(match ? 'existing' : 'new');
       setPersonId(match ? match.x.id : (people[0] ? people[0].id : ''));
       setNewName(p.contactName || '');
-      setDateValue(TODAY());
+      setDateValue(p.earliestCapture && p.earliestCapture <= TODAY() ? p.earliestCapture : TODAY());
       setPhase('review');
     } catch (err) {
       setErrMsg((err && err.fileName ? err.fileName + ': ' : '')
@@ -7117,8 +7339,26 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
               )}
 
               {payload.needsDate && (
-                <Field label="Date of these messages" hint={(payload.markers || []).length ? 'Chat shows ' + payload.markers.join(', ') : 'No dated divider found'}>
-                  <input type="date" value={dateValue} onChange={e => setDateValue(e.target.value)} className={selectCls} />
+                <Field
+                  label={(payload.relativeLabels || []).length
+                    ? 'It says ' + payload.relativeLabels.slice(0, 2).map(l => '"' + l + '"').join(' and ') + ' — what date is that?'
+                    : 'No date in this chat — when was it taken?'}
+                  hint={payload.earliestCapture
+                    ? 'A message here is dated ' + formatDayLabel(payload.earliestCapture) + ', so not before that.'
+                    : 'The day you took the screenshot.'}
+                >
+                  <input type="date" value={dateValue} max={TODAY()}
+                    min={payload.earliestCapture || undefined}
+                    onChange={e => setDateValue(e.target.value)} className={selectCls} />
+                  {(payload.relativeLabels || []).length > 0 && (
+                    <div className="mt-1.5 space-y-0.5">
+                      {payload.relativeLabels.slice(0, 4).map((l, i) => (
+                        <p key={i} className="text-[11px] text-stone-500">
+                          "{l}" → {formatDayLabel(parseDayLabel(l, dateValue) || dateValue)}
+                        </p>
+                      ))}
+                    </div>
+                  )}
                 </Field>
               )}
 
@@ -7147,6 +7387,53 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function CoachPanel({ onChanged }) {
+  const [keys, setKeys] = useState(selectedCoachKeys);
+
+  function toggle(k) {
+    const next = keys.includes(k) ? keys.filter(x => x !== k) : [...keys, k];
+    setKeys(next);
+    saveCoachKeys(next);
+    if (onChanged) onChanged();
+  }
+
+  return (
+    <div className="mt-6 pt-4 border-t border-stone-200">
+      <h4 className="text-sm font-semibold text-stone-700 mb-1">Who coaches you</h4>
+      <p className="text-xs text-stone-500 mb-2">
+        The schools the read draws on. Turn one off and its ideas stop appearing. Set per device; takes effect on the
+        next read.
+      </p>
+      <div className="space-y-1.5">
+        {COACHES.map(c => {
+          const on = keys.includes(c.key);
+          return (
+            <button key={c.key} onClick={() => toggle(c.key)}
+              className={`w-full text-left flex items-start gap-2.5 border rounded-md px-3 py-2 ${
+                on ? 'border-stone-900 bg-stone-50' : 'border-stone-300 hover:bg-stone-50'
+              }`}>
+              <span className={`mt-0.5 w-4 h-4 rounded border shrink-0 flex items-center justify-center ${
+                on ? 'bg-stone-900 border-stone-900' : 'border-stone-400'
+              }`}>
+                {on && <Check className="w-3 h-3 text-white" />}
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-medium text-stone-900">{c.name}</span>
+                <span className="block text-xs text-stone-500">{c.note}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {keys.length === 0 && (
+        <p className="text-xs text-amber-700 mt-2">
+          With none selected the read still works, but it coaches from general judgement rather than any school.
+        </p>
+      )}
     </div>
   );
 }
@@ -7519,7 +7806,7 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
   function exportData() {
     const blob = { exportedAt: new Date().toISOString(), version: APP_VERSION, build: BUILD_STAMP, people };
     const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(blob, null, 2));
-    downloadDataUrl(dataUrl, 'relationship-tracker-backup.json');
+    downloadDataUrl(dataUrl, 'spinning-plates-backup.json');
     Local.set('rt:last-export', TODAY());
     if (onExported) onExported(TODAY());
   }
@@ -7656,6 +7943,7 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
               <span className="text-[11px] text-stone-400">Version {APP_VERSION} · build {BUILD_STAMP}</span>
               <button onClick={onShowChangelog} className="text-xs text-stone-600 underline">Version history</button>
             </div>
+            <CoachPanel />
             <LockPanel key={lockVersion} onChanged={onLockChanged} />
             <SyncPanel
               syncState={syncState}
@@ -7851,6 +8139,11 @@ const Upload = makeIcon(/*#__PURE__*/React.createElement(React.Fragment, null, /
 const Phone = makeIcon(/*#__PURE__*/React.createElement("path", {
   d: "M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.7A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.7a2 2 0 0 1-.5 2.1L8 9.7a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.5 2.7.6a2 2 0 0 1 1.7 2z"
 }));
+const TrendingUp = makeIcon(/*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("polyline", {
+  points: "22 7 13.5 15.5 8.5 10.5 2 17"
+}), /*#__PURE__*/React.createElement("polyline", {
+  points: "16 7 22 7 22 13"
+})));
 const Camera = makeIcon(/*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("path", {
   d: "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"
 }), /*#__PURE__*/React.createElement("circle", {
@@ -7968,7 +8261,7 @@ const BUILD_STAMP = '2026-08-07 21:52 IST';
 // Gist's own revision history doubles as versioned backups.
 
 const GIST_FILE = 'relationship-tracker-data.json';
-const GIST_TAG = 'relationship-tracker: private data store (do not edit by hand)';
+const GIST_TAG = 'Spinning Plates: private data store (do not edit by hand)';
 const Sync = {
   token() {
     return Local.get('rt:gh-token') || '';
@@ -8472,7 +8765,7 @@ Ignore anything neither of you actually said: encryption notices, "missed voice 
 
 Respond with ONLY a JSON object, no other text, no markdown fences:
 {
-"summary": string — two or three sentences addressed to him on what this exchange was about and how it went between you and her. For example: "You opened about her hiking photo and she came back warmly, though she kept it brief." Never write about him in the third person.
+"summary": string — ONE short sentence under 25 words, addressed to you, on what this exchange amounted to. Always "you" and "she". Example: "You opened about her hiking photo and she came back warmly but briefly."
 "facts": array of short strings — the things worth remembering, written to him: what she revealed about her life, work, family, plans or opinions; anything you agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, compliments and other small talk. Empty array if it was all small talk.
 }
 Work only from the lines given. Do not invent anything. Respond with the JSON object only.`;
@@ -8493,6 +8786,11 @@ async function summariseDay(day, personName) {
 // Days imported before summaries existed, or any that came back blank.
 function daysNeedingSummary(person) {
   return (person.conversationDays || []).filter(d => d && (d.points || []).length && !(d.summary || '').trim());
+}
+
+// Days logged before facts were split by speaker still show under one heading.
+function dayHasSplitFacts(day) {
+  return !!(day && ((day.sheShared || []).length || (day.iShared || []).length || (day.agreed || []).length));
 }
 
 // Chat happens on the phone; dates happen in the world and leave no trace except
@@ -9044,7 +9342,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
     "panel": integer — the panel number this session begins in.
     "dayLabel": string or null (the divider exactly as printed above this session, e.g. "Today", "14 July"),
     "date": string or null (YYYY-MM-DD. RESOLVE THE DIVIDER — see the dating rules below. Null only if this session has no day information of any kind above it.),
-    "summary": string — two or three sentences addressed to him on what this session was about and how it went between you and her. Second person throughout. Not a transcript.
+    "summary": string — ONE short sentence, addressed to you, on what this exchange amounted to and how it went. Under 25 words. Always "you" and "she" — never "he", "him", "the user", or your name. Example: "You suggested Saturday and she said yes without hesitating." Not a transcript, not a list of topics.
     "facts": array of short strings — the things worth remembering: what she revealed about her life, work, family, plans or opinions; anything agreed, arranged or declined; questions left unanswered. Concrete only. Leave OUT greetings, weather, "how was your day", compliments and other small talk. Empty array if the session was pure small talk.
     "points": array of {"from": "she" or "me", "point": string, "timeLabel": string or null} — the underlying chronology, one condensed line per meaningful exchange of about 8-15 words, in order. AT MOST 8 PER SESSION: if the day ran longer than that, keep the 8 that matter and let the summary and facts carry the rest. Never let this array make your reply so long that it gets cut off — the summary and facts matter more than the points.
   }
@@ -9640,8 +9938,9 @@ async function extractChatPayload(files, onProgress) {
     // A relative divider can never be resolved from the image alone, however many
     // absolute dates sit alongside it: "Today" is whenever the screenshot was
     // taken. So it is always asked, and only skipped when nothing relative exists.
-    needsDate: sessions.length > 0 && (dateMarkers.some(m => m.needsCapture) || sessions.some(ses => ses && needsCaptureDate(ses.dayLabel)) || !dateMarkers.length),
-    relativeLabels: Array.from(new Set(dateMarkers.filter(m => m.needsCapture).map(m => m.label).concat(sessions.filter(ses => ses && needsCaptureDate(ses.dayLabel)).map(ses => ses.dayLabel)))).filter(Boolean),
+    needsDate: sessions.length > 0 && (dateMarkers.some(m => m.needsCapture) || sessions.some(ses => ses && needsCaptureDate(ses.dayLabel)) || markers.some(mk => needsCaptureDate(mk)) || !dateMarkers.length),
+    // Every relative divider seen by either pass, so none is silently resolved.
+    relativeLabels: Array.from(new Set(dateMarkers.filter(m => m.needsCapture).map(m => m.label).concat(sessions.filter(ses => ses && needsCaptureDate(ses.dayLabel)).map(ses => ses.dayLabel)).concat(markers.filter(mk => needsCaptureDate(mk))))).filter(Boolean),
     earliestCapture: earliestPossibleCapture(dateMarkers),
     assumedDates: dateMarkers.some(m => m.assumed)
   };
@@ -9819,13 +10118,16 @@ function mergeSessions(existingDays, incoming, knownKeys) {
     day.summaries = day.summaries || (day.summary ? [day.summary] : []);
     const sum = String(ses.summary || '').trim();
     if (sum && !day.summaries.some(x => normaliseMsg(x) === normaliseMsg(sum))) day.summaries.push(sum);
-    (ses.facts || []).forEach(f => {
-      const t = String(f || '').trim();
-      if (!t) return;
-      if (!day.facts.some(x => normaliseMsg(x) === normaliseMsg(t))) {
-        day.facts.push(t);
-        addedFacts += 1;
-      }
+    ['facts', 'sheShared', 'iShared', 'agreed'].forEach(k => {
+      day[k] = day[k] || [];
+      (ses[k] || []).forEach(f => {
+        const t = String(f || '').trim();
+        if (!t) return;
+        if (!day[k].some(x => normaliseMsg(x) === normaliseMsg(t))) {
+          day[k].push(t);
+          addedFacts += 1;
+        }
+      });
     });
     (ses.points || []).forEach(p => {
       const text = String(p && p.point || '').trim();
@@ -10308,12 +10610,17 @@ function mergeChatResults(results) {
         if (ses.summary && !normaliseMsg(prev.summary || '').includes(normaliseMsg(ses.summary).slice(0, 40))) {
           prev.summary = ((prev.summary || '') + ' ' + ses.summary).trim();
         }
-        prev.facts = [...(prev.facts || []), ...(ses.facts || [])];
+        ['facts', 'sheShared', 'iShared', 'agreed'].forEach(k => {
+          prev[k] = [...(prev[k] || []), ...(ses[k] || [])];
+        });
         prev.points = [...(prev.points || []), ...(ses.points || [])];
       } else {
         byDate[key] = {
           ...ses,
           facts: [...(ses.facts || [])],
+          sheShared: [...(ses.sheShared || [])],
+          iShared: [...(ses.iShared || [])],
+          agreed: [...(ses.agreed || [])],
           points: [...(ses.points || [])]
         };
         out.sessions.push(byDate[key]);
@@ -10390,30 +10697,69 @@ const stageBadgeClass = {
 
 // ---------- Status read (coach summary at the top of a profile) ----------
 
-const COACH_PROMPT = `You are this man's dating coach. He is in his fifties, established, no time to waste. Write TO HIM, in the second person — "you", "she", "your". Never refer to him as "the user", "he" or "him", and never write about him in the third person. This applies to every field you return, including the per-date notes.
+// ---------- Coaches ----------
+// Which schools the read draws on. Adding one here is all it takes.
 
-YOUR COACHING IS A BLEND OF FIVE SCHOOLS. Use whichever fits the evidence:
-- Doc Love (The System, The Dating Dictionary). INTEREST LEVEL is the core of your reading: her interest in you, 0 to 100, set by her behaviour and not talked into existence. His rules: be a Challenge, not a Wimp; she who cares less controls the relationship; never argue, complain or explain; do not buy her attention with gifts, compliments or long messages; let her invest; if she flakes twice her interest level is your answer; and when it is over, FIDO — forget it, drive on.
+const COACHES = [{
+  key: 'doclove',
+  name: 'Doc Love',
+  note: 'The System — interest level, be a challenge, FIDO',
+  text: 'Doc Love (The System, The Dating Dictionary). INTEREST LEVEL is the core of your reading: her interest in you, 0 to 100, set by her behaviour and not talked into existence. His rules: be a Challenge, not a Wimp; she who cares less controls the relationship; never argue, complain or explain; do not buy her attention with gifts, compliments or long messages; let her invest; if she flakes twice her interest level is your answer; and when it is over, FIDO — forget it, drive on.'
+}, {
+  key: 'bacon',
+  name: 'Dan Bacon',
+  note: 'Confidence and leading the interaction',
+  text: 'Dan Bacon: attraction is created by how you carry yourself, not by seeking approval. Move things forward with confidence rather than asking permission.'
+}, {
+  key: 'gunn',
+  name: 'Gary Gunn',
+  note: 'Natural warmth over technique',
+  text: 'Gary Gunn: warmth and natural conversation over technique. Be a real person she wants to spend an evening with.'
+}, {
+  key: 'rio',
+  name: 'Bobby Rio',
+  note: 'Intrigue and playful tension',
+  text: "Bobby Rio: intrigue and playful tension. Don't hand over everything you think; leave her curious."
+}, {
+  key: 'taragan',
+  name: 'Orion Taragan',
+  note: 'Relaxed masculine frame',
+  text: 'Orion Taragan: relaxed masculine frame — you are not auditioning, you are deciding whether she suits you.'
+}, {
+  key: 'perel',
+  name: 'Esther Perel',
+  note: 'Desire, honesty and what you each need',
+  text: 'Esther Perel: desire needs space as well as closeness, and honesty about what each of you actually wants beats managing the other person. Useful when something has real potential and the question is how to keep it alive.'
+}];
+const DEFAULT_COACHES = ['doclove', 'bacon', 'gunn', 'rio', 'taragan'];
+function selectedCoachKeys() {
+  const raw = Local.get('rt:coaches');
+  if (!raw) return DEFAULT_COACHES;
+  try {
+    const list = JSON.parse(raw);
+    const valid = Array.isArray(list) ? list.filter(k => COACHES.some(c => c.key === k)) : [];
+    return valid.length ? valid : DEFAULT_COACHES;
+  } catch (e) {
+    return DEFAULT_COACHES;
+  }
+}
+function saveCoachKeys(keys) {
+  Local.set('rt:coaches', JSON.stringify(keys));
+}
+function selectedCoaches() {
+  const keys = selectedCoachKeys();
+  return COACHES.filter(c => keys.includes(c.key));
+}
+const COACH_PROMPT_HEAD = `You are this man's dating coach. He is in his fifties, established, no time to waste. Write TO HIM, in the second person — "you", "she", "your". Never refer to him as "the user", "he" or "him", and never write about him in the third person. This applies to every field you return, including the per-date notes.
 
-SCORING INTEREST LEVEL — apply this consistently, because he tracks the number over time:
-  90-100  She makes it effortless. Initiates, replies quickly and at length, asks about you, offers her availability, never cancels, wants the next meeting arranged.
-  70-89   Clearly interested but you are still doing more of the work. She responds well and says yes, but rarely starts things.
-  51-69   Lukewarm. Pleasant, slow, reactive. Says yes vaguely, never proposes anything. This is where most stalled connections sit.
-  31-50   Low. Short replies, long gaps, deflects arrangements, or cancelled without offering another day.
-  0-30    Gone. One-word answers, no reply, or a second flake.
+__COACH_LIST__
 
-ACTIONS OUTWEIGH WORDS — BUT BEFORE A FIRST DATE, HER MESSAGE BEHAVIOUR IS THE ONLY ACTION AVAILABLE, so read it as action rather than dismissing it:
-- Pre-date, these ARE her actions: how fast she replies, whether she starts conversations herself, whether she asks about you, whether her replies match yours in substance, whether she volunteers her availability, and above all whether she says yes to meeting and then holds the arrangement.
-- Warm, complimentary words with no movement toward meeting are not evidence of interest. Enthusiastic language plus a clear yes to a specific day is.
-- Never raise the score because she said something flattering, or because she says she likes you. Raise it for availability and initiation.
-- If he has not yet asked her out, say so and mark the number provisional — the real test has not been run. Do not score above 85 before you have actually met her; interest that survives no contact with reality is unproven.
-- Once you have met, the actions widen: did she turn up, was she on time, did she want a second, did she make contact afterwards, did she agree quickly to the next one. These outrank anything typed.
-- One cancellation with a specific alternative day offered is not a flake. A cancellation with nothing offered in its place is. Two of those and the answer is settled.
-
-- Dan Bacon: attraction is created by how you carry yourself, not by seeking approval. Move things forward with confidence rather than asking permission.
-- Gary Gunn: warmth and natural conversation over technique. Be a real person she wants to spend an evening with.
-- Bobby Rio: intrigue and playful tension. Don't hand over everything you think; leave her curious.
-- Orion Taragan: relaxed masculine frame — you are not auditioning, you are deciding whether she suits you.
+USE HIS SIDE THROUGHOUT, NOT AS AN AFTERTHOUGHT. Where he has recorded his own intention, interest level, attraction, how much he enjoys her company, the logistics and his dealbreakers, that is half the picture. Weave it into the status and the recommendation rather than mentioning it once at the end:
+- Judge the connection against what HE wants, not against some general idea of a good match.
+- Compare the two interest levels explicitly when you have both, and say who is doing the work.
+- If he rates attraction high and compatibility low, or enjoys her company but does not want what she wants, name that tension — it is usually the real question, not her behaviour.
+- Weigh his logistics answers as part of whether this is worth his time.
+- If he has recorded nothing, say plainly that the read is one-sided without it and point him at "Where you stand".
 
 WHAT HE WANTS DECIDES WHAT GOOD LOOKS LIKE. You may be told his intention. Advice must follow it rather than assuming everyone is chasing a wife:
 - Seeing what's there — help him find out quickly: get her in front of him and see whether there is anything in the room.
@@ -10429,7 +10775,8 @@ INTEREST GAP. Where you have both numbers, compare them. Him well above her mean
 
 LOGISTICS ARE PART OF COMPATIBILITY, not an afterthought. Ninety minutes of driving, schedules that never line up, or a life that pulls against his own will kill a promising thing regardless of chemistry — and are worth tolerating for something genuinely good. Weigh what he told you about travel, schedules and fit, and say when the practical picture undermines the romantic one.
 
-RED FLAGS. Name them when you see them, once, without lecturing. The standard ones: still hung up on an ex, cancelling repeatedly, hot then cold, only available at odd hours, evasive about her circumstances, money appearing early, pushing for private contact or platforms too fast, contempt about previous partners, love-bombing, inconsistencies in her story, or pressure that makes him uneasy. Include anything he has clocked himself and take it seriously — he was there. Flag it, say why it matters, and leave the decision to him. He is a grown man having a good time, not a case to be managed.
+FLAGS, GOOD AND BAD. Name what you see, once, without lecturing. Red flags, the standard ones: still hung up on an ex, cancelling repeatedly, hot then cold, only available at odd hours, evasive about her circumstances, money appearing early, pushing for private contact or platforms too fast, contempt about previous partners, love-bombing, inconsistencies in her story, or pressure that makes him uneasy. Include anything he has clocked himself and take it seriously — he was there. Flag it, say why it matters, and leave the decision to him. He is a grown man having a good time, not a case to be managed.
+Green flags matter just as much and are easy to overlook: she asks about him and remembers the answers, she suggests things herself, she is straight about her availability, she holds arrangements, she speaks decently about people who let her down, she is comfortable being pleased to see him. Say so when you see them.
 
 TONE. Lighthearted and dry, like a sharp friend across a pint. He is in his fifties, enjoying his dating life, not out to hurt anyone and not in need of a lecture. No therapy-speak, no solemnity, no moralising — but do not soften a hard truth to be liked. A well-placed joke is fine; a wasted month is not.
 
@@ -10457,7 +10804,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences:
 "relationshipStart": string or null — "YYYY-MM", the month this began, judged from the record: the month you matched, or the first contact you can see. Null only if there is nothing to go on.
 "relationshipEnd": string or null — "YYYY-MM", the month it ended, but ONLY if it is genuinely over: she ended it, you ended it, or it has faded with no contact for months and nothing arranged. Null if it is still live, even if it is going badly. Do not close something down over a fortnight's quiet.
 "isOver": true or false — your judgement on whether this is finished. Be honest rather than hopeful: months of silence with no arrangement is finished, whatever either of you last said.
-"redFlags": array of objects {"flag": string (a few words), "why": string (one sentence on what it tends to mean), "severity": "note" or "watch" or "serious"} — anything worth him seeing, from her behaviour or from what he has clocked himself. Empty array if there is genuinely nothing. Do not invent flags to look thorough.
+"flags": array of objects {"flag": string (a few words), "why": string (one sentence on what it tends to mean), "signal": "green" or "amber" or "red"} — the signals worth him seeing, good and bad. GREEN for genuinely good signs: she initiates, she is straightforward about what she wants, she turns up and is on time, she reschedules herself when something clashes, she is warm about her own life rather than bitter. AMBER for things to watch. RED for the serious ones. Include anything he has clocked himself. List green signals as readily as red ones — a read that only ever finds problems is not an honest read. Empty array only if there is genuinely nothing either way.
 "alignment": string or null — one sentence on whether what he wants and what she is doing point the same way. Null if you do not know his intention.
 "dateNotes": array of objects {"date": "YYYY-MM-DD", "read": string} — one entry for each COMPLETED date in the timeline, in date order. "read" is one or two sentences of YOUR interpretation of that particular meeting: what it tells you about her interest level and where things stood after it. Do not repeat your own notes back at you — you wrote them and can read them. Interpret them instead. If you wrote nothing about a date, say what that silence leaves unknown. Empty array if there are no completed dates.
 "recommendation": string — 2-4 sentences. If it is live, the single next move, why it works and what to avoid. If it is over, the lesson to carry forward: the pattern to watch for, the thing to do differently, or the standard to hold next time. Never suggest contacting a woman it is over with. Specific enough to act on today: if it is a message, say what it must do; if it is to wait, say how long; if her interest level is low, say so and tell him plainly to stop investing.
@@ -10532,7 +10879,12 @@ function buildCoachContext(person, brief) {
     shown.forEach(item => {
       if (item.kind === 'chat') {
         lines.push('  ' + (item.date || 'undated') + ' MESSAGES — ' + (item.day.summary || 'no summary'));
-        if (!brief) (item.day.facts || []).forEach(f => lines.push('      fact: ' + f));
+        if (!brief) {
+          (item.day.sheShared || []).forEach(f => lines.push('      she told you: ' + f));
+          (item.day.iShared || []).forEach(f => lines.push('      you told her: ' + f));
+          (item.day.agreed || []).forEach(f => lines.push('      agreed: ' + f));
+          (item.day.facts || []).forEach(f => lines.push('      noted: ' + f));
+        }
       } else if (item.kind === 'contact') {
         lines.push('  ' + item.date + ' ' + (item.entry.type || 'Contact').toUpperCase() + ' — YOUR OWN ACCOUNT (nothing else records this): ' + item.entry.text);
       } else {
@@ -10594,7 +10946,13 @@ function buildCoachContext(person, brief) {
   lines.push('Today is ' + TODAY() + '.');
   return lines.join('\n');
 }
+function buildCoachPrompt() {
+  const chosen = selectedCoaches();
+  const list = chosen.length ? 'YOUR COACHING DRAWS ON THESE SCHOOLS. Use whichever fits the evidence:\n' + chosen.map(c => '- ' + c.text).join('\n') : 'Coach from your own judgement, plainly and without jargon.';
+  return COACH_PROMPT_HEAD.replace('__COACH_LIST__', list);
+}
 async function generateCoachSummary(person, onProgress) {
+  const COACH_PROMPT = buildCoachPrompt();
   const full = buildCoachContext(person) + '\n\n' + COACH_PROMPT;
   const attempts = [{
     text: full,
@@ -10638,11 +10996,12 @@ async function generateCoachSummary(person, onProgress) {
     status: String(result.status || '').trim(),
     recommendation: String(result.recommendation || '').trim(),
     generatedAt: new Date().toISOString(),
-    redFlags: Array.isArray(result.redFlags) ? result.redFlags.map(f => ({
+    flags: (Array.isArray(result.flags) ? result.flags : Array.isArray(result.redFlags) ? result.redFlags : []).map(f => ({
       flag: String(f.flag || '').trim(),
       why: String(f.why || '').trim(),
-      severity: ['note', 'watch', 'serious'].includes(f.severity) ? f.severity : 'note'
-    })).filter(f => f.flag) : [],
+      // Older reads used severity; map them onto the scale.
+      signal: ['green', 'amber', 'red'].includes(f.signal) ? f.signal : f.severity === 'serious' ? 'red' : f.severity === 'watch' ? 'amber' : 'amber'
+    })).filter(f => f.flag),
     alignment: String(result.alignment || '').trim(),
     relationshipStart: /^\d{4}-\d{2}$/.test(String(result.relationshipStart || '')) ? result.relationshipStart : '',
     relationshipEnd: /^\d{4}-\d{2}$/.test(String(result.relationshipEnd || '')) ? result.relationshipEnd : '',
@@ -10795,18 +11154,49 @@ function StatusPanel({
     className: "text-[10px] uppercase tracking-wide text-stone-400 mb-0.5"
   }, "Next move"), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-800"
-  }, read.recommendation)), (read.redFlags || []).length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  }, read.recommendation)), (read.flags || []).length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     className: "text-[10px] uppercase tracking-wide text-stone-400 mb-1"
-  }, "Worth knowing — your call"), /*#__PURE__*/React.createElement("div", {
+  }, "Signals — your call"), /*#__PURE__*/React.createElement("div", {
     className: "space-y-1.5"
-  }, read.redFlags.map((f, i) => /*#__PURE__*/React.createElement("div", {
-    key: i,
-    className: `rounded-md px-2.5 py-2 border ${f.severity === 'serious' ? 'bg-red-50 border-red-200' : f.severity === 'watch' ? 'bg-amber-50 border-amber-200' : 'bg-stone-50 border-stone-200'}`
-  }, /*#__PURE__*/React.createElement("div", {
-    className: `text-sm font-medium ${f.severity === 'serious' ? 'text-red-800' : f.severity === 'watch' ? 'text-amber-900' : 'text-stone-800'}`
-  }, f.flag), f.why && /*#__PURE__*/React.createElement("div", {
-    className: "text-xs text-stone-600 mt-0.5"
-  }, f.why))))), /*#__PURE__*/React.createElement("p", {
+  }, [...read.flags].sort((a, b) => {
+    const order = {
+      red: 0,
+      amber: 1,
+      green: 2
+    };
+    return (order[a.signal] ?? 1) - (order[b.signal] ?? 1);
+  }).map((f, i) => {
+    const tone = f.signal === 'green' ? {
+      box: 'bg-emerald-50 border-emerald-200',
+      text: 'text-emerald-800',
+      dot: 'bg-emerald-600',
+      label: 'Green flag'
+    } : f.signal === 'red' ? {
+      box: 'bg-red-50 border-red-200',
+      text: 'text-red-800',
+      dot: 'bg-red-600',
+      label: 'Red flag'
+    } : {
+      box: 'bg-amber-50 border-amber-200',
+      text: 'text-amber-900',
+      dot: 'bg-amber-500',
+      label: 'Worth watching'
+    };
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      className: `rounded-md px-2.5 py-2 border ${tone.box}`
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "flex items-center gap-1.5"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: `w-2 h-2 rounded-full shrink-0 ${tone.dot}`
+    }), /*#__PURE__*/React.createElement("span", {
+      className: `text-sm font-medium ${tone.text}`
+    }, f.flag), /*#__PURE__*/React.createElement("span", {
+      className: "text-[10px] uppercase tracking-wide text-stone-400 ml-auto shrink-0"
+    }, tone.label)), f.why && /*#__PURE__*/React.createElement("div", {
+      className: "text-xs text-stone-600 mt-0.5 ml-3.5"
+    }, f.why));
+  }))), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-stone-400"
   }, "Read taken ", formatReadStamp(read.generatedAt), ".")));
 }
@@ -10874,7 +11264,7 @@ const Lock = {
       publicKey: {
         challenge,
         rp: {
-          name: 'Relationship Tracker',
+          name: 'Spinning Plates',
           id: window.location.hostname
         },
         user: {
@@ -11106,7 +11496,7 @@ function googleCalendarUrl(person, entry) {
     start,
     end
   } = dateEventTimes(entry);
-  const details = [entry.activity || '', entry.notes ? entry.notes.replace(/From chat import/, '').trim() : '', 'Logged in Relationship Tracker.'].filter(Boolean).join('\n');
+  const details = [entry.activity || '', entry.notes ? entry.notes.replace(/From chat import/, '').trim() : '', 'Logged in Spinning Plates.'].filter(Boolean).join('\n');
   const params = new URLSearchParams({
     action: 'TEMPLATE',
     text: calendarTitle(person, entry),
@@ -11123,7 +11513,7 @@ function icsForDate(person, entry, sequence) {
   } = dateEventTimes(entry);
   const esc = t => String(t || '').replace(/([,;\\])/g, '\\$1').replace(/\n/g, '\\n');
   const uid = 'rt-' + entry.id + '@relationship-tracker';
-  return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Relationship Tracker//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'BEGIN:VEVENT', 'UID:' + uid, 'SEQUENCE:' + (sequence || 0), 'DTSTAMP:' + stampUTC(new Date()), 'DTSTART:' + stampUTC(start), 'DTEND:' + stampUTC(end), 'SUMMARY:' + esc(calendarTitle(person, entry)), 'LOCATION:' + esc(entry.location || ''), 'DESCRIPTION:' + esc((entry.notes || '') + (entry.notes ? '\n' : '') + 'Logged in Relationship Tracker.'), 'STATUS:' + (entry.status === 'Cancelled' ? 'CANCELLED' : 'CONFIRMED'), 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
+  return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Relationship Tracker//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'BEGIN:VEVENT', 'UID:' + uid, 'SEQUENCE:' + (sequence || 0), 'DTSTAMP:' + stampUTC(new Date()), 'DTSTART:' + stampUTC(start), 'DTEND:' + stampUTC(end), 'SUMMARY:' + esc(calendarTitle(person, entry)), 'LOCATION:' + esc(entry.location || ''), 'DESCRIPTION:' + esc((entry.notes || '') + (entry.notes ? '\n' : '') + 'Logged in Spinning Plates.'), 'STATUS:' + (entry.status === 'Cancelled' ? 'CANCELLED' : 'CONFIRMED'), 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
 }
 function downloadIcs(person, entry, sequence) {
   const data = 'data:text/calendar;charset=utf-8,' + encodeURIComponent(icsForDate(person, entry, sequence));
@@ -11300,12 +11690,36 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '2.0.4';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '2.0.4',
+  date: '2026-08-08',
+  changes: [['changed', 'Plates redrawn from the reference: the underside shows as a crescent below the face, giving real depth, with the poles back'], ['changed', 'One long sweep either side, hugging the rim and tapering to a point, instead of short ticks']]
+}, {
+  version: '2.0.3',
+  date: '2026-08-08',
+  changes: [['changed', 'Plates redrawn as dinner plates: a fine well line tracking the rim shows the sloped edge, instead of the record-like hole'], ['changed', 'Spin arcs now taper to a rounded point at each end and sit clear of the plate']]
+}, {
+  version: '2.0.2',
+  date: '2026-08-08',
+  changes: [['changed', 'Icon reworked: two plates instead of three, poles dropped in favour of an inner rim, and curved motion trails to show the spin'], ['added', 'A simplified icon for small sizes — one bolder plate, since fine detail turns to mush below 64px']]
+}, {
+  version: '2.0.1',
+  date: '2026-08-08',
+  changes: [['changed', 'The mark now sets the spinning plates inside the heart outline, keeping both']]
+}, {
+  version: '2.0.0',
+  date: '2026-08-08',
+  changes: [['changed', 'The app is now called Spinning Plates, with a new mark and icon set'], ['added', 'Choose which coaches inform the read, in Settings'], ['added', 'Esther Perel added to the roster'], ['changed', 'Signals are now a green to red scale, with good signs called out as readily as bad'], ['changed', 'Chat records are briefer: one line per day, with facts split into what she told you, what you told her, and what was agreed'], ['changed', 'Your own intention and interest are woven through the read rather than mentioned at the end'], ['changed', 'Header buttons carry labels and spread across the screen on mobile']]
+}, {
+  version: '1.11.1',
+  date: '2026-08-08',
+  changes: [['fixed', '"No dated divider found" still appeared in bulk import even when dates had been identified — that field was reading the old marker list'], ['changed', 'Bulk import asks the same explicit question as the person page, with the same preview and earliest-date limit'], ['changed', 'The date picker defaults to the last date the chat is certain about, rather than to today']]
+}, {
   version: '1.11.0',
   date: '2026-08-08',
   changes: [['changed', 'A relative divider always prompts now: an absolute date elsewhere in the image says nothing about when the screenshot was taken'], ['changed', 'The prompt asks it plainly — It says "Today" — what date is that?'], ['added', 'Date labels are classified as absolute, day-and-month, or relative, and only relative ones need you'], ['added', 'The capture date cannot be set earlier than a message already dated in the chat'], ['added', 'Quick options for today, yesterday and a week ago, with a live preview of what each divider becomes']]
@@ -11535,6 +11949,113 @@ function ChangelogModal({
   }, text)))))), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-stone-400 border-t border-stone-100 pt-3"
   }, "Versions before 1.1.0 were reconstructed from the development history, so their dates are approximate. Build ", BUILD_STAMP, "."))));
+}
+
+// The mark: two dinner plates spinning on poles inside a heart. The same
+// construction as the icon files — face, underside crescent for depth, a fine
+// well line, and one long tapering sweep either side.
+function PlatesMark({
+  className,
+  style
+}) {
+  const heartPath = (cx, cy, s) => {
+    const pts = [];
+    for (let i = 0; i <= 160; i++) {
+      const t = 2 * Math.PI * i / 160;
+      const x = cx + 16 * Math.pow(Math.sin(t), 3) * s;
+      const y = cy - (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)) * s;
+      pts.push((i ? 'L' : 'M') + x.toFixed(2) + ' ' + y.toFixed(2));
+    }
+    return pts.join(' ') + ' Z';
+  };
+  const taperedArc = (cx, cy, rx, ry, a0, a1, w, steps = 44) => {
+    const inner = [],
+      outer = [];
+    for (let i = 0; i <= steps; i++) {
+      const f = i / steps;
+      const a = (a0 + (a1 - a0) * f) * Math.PI / 180;
+      const hw = w * Math.sin(Math.PI * f) / 2;
+      const x = cx + rx * Math.cos(a),
+        y = cy + ry * Math.sin(a);
+      const nx = Math.cos(a),
+        ny = Math.sin(a);
+      inner.push([x - nx * hw, y - ny * hw]);
+      outer.push([x + nx * hw, y + ny * hw]);
+    }
+    return inner.concat(outer.reverse()).map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(2) + ' ' + p[1].toFixed(2)).join(' ') + ' Z';
+  };
+  const cx = 25,
+    cy = 25,
+    s = 1.32;
+  const bg = 'var(--mark-bg, #f5f5f4)';
+  const plates = [{
+    x: cx - 2.1,
+    y: cy - 4.0,
+    rx: 6.5,
+    ang: 13
+  }, {
+    x: cx + 5.3,
+    y: cy + 2.8,
+    rx: 3.6,
+    ang: -16
+  }];
+  const base = cy + 9.2;
+  return /*#__PURE__*/React.createElement("svg", {
+    viewBox: "0 0 50 50",
+    className: className,
+    style: style,
+    role: "img",
+    "aria-label": "Spinning Plates"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: heartPath(cx, cy, s),
+    fill: "#dc2626"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: heartPath(cx, cy + 1.5, s * 0.72),
+    fill: bg
+  }), plates.map((p, i) => /*#__PURE__*/React.createElement("line", {
+    key: 'pole' + i,
+    x1: p.x,
+    y1: p.y + p.rx * 0.13,
+    x2: p.x,
+    y2: base,
+    stroke: "currentColor",
+    strokeWidth: "0.5",
+    opacity: "0.55"
+  })), plates.map((p, i) => {
+    const ry = p.rx * 0.30,
+      depth = ry * 0.52;
+    return /*#__PURE__*/React.createElement("g", {
+      key: i,
+      transform: `rotate(${p.ang} ${p.x} ${p.y})`
+    }, [[128, 232], [-52, 52]].map(([a0, a1], n) => /*#__PURE__*/React.createElement("path", {
+      key: n,
+      d: taperedArc(p.x, p.y, p.rx * 1.34, ry * 1.34, a0, a1, 0.7),
+      fill: "currentColor",
+      opacity: "0.5"
+    })), /*#__PURE__*/React.createElement("ellipse", {
+      cx: p.x,
+      cy: p.y + depth,
+      rx: p.rx,
+      ry: ry,
+      fill: "currentColor",
+      opacity: "0.45"
+    }), /*#__PURE__*/React.createElement("ellipse", {
+      cx: p.x,
+      cy: p.y,
+      rx: p.rx,
+      ry: ry,
+      fill: "currentColor"
+    }), /*#__PURE__*/React.createElement("ellipse", {
+      cx: p.x,
+      cy: p.y,
+      rx: p.rx * 0.60,
+      ry: ry * 0.60,
+      fill: "none",
+      stroke: bg,
+      strokeWidth: "0.35",
+      opacity: "0.5"
+    }));
+  }));
 }
 
 // ---------- Crash guard ----------
@@ -12942,45 +13463,54 @@ function RelationshipTracker() {
   }, /*#__PURE__*/React.createElement("div", {
     className: "max-w-2xl mx-auto px-4 py-8"
   }, /*#__PURE__*/React.createElement("header", {
-    className: "flex flex-wrap items-center justify-between gap-3 mb-6"
+    className: "mb-5"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-2 min-w-0"
-  }, /*#__PURE__*/React.createElement(Heart, {
-    className: "w-5 h-5 text-red-700 shrink-0",
-    strokeWidth: 1.75
+    className: "flex items-center gap-2.5 mb-3"
+  }, /*#__PURE__*/React.createElement(PlatesMark, {
+    className: "w-12 h-12 text-stone-800 shrink-0",
+    style: {
+      '--mark-bg': '#f5f5f4'
+    }
   }), /*#__PURE__*/React.createElement("h1", {
-    className: "text-xl font-serif tracking-tight truncate"
-  }, "Relationship Tracker")), /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-1.5 shrink-0"
+    className: "text-3xl font-serif tracking-tight leading-none"
+  }, "Spinning Plates")), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-stretch gap-1.5"
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setShowSettings(true),
-    className: "p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900",
-    "aria-label": "Settings",
-    title: "Settings"
-  }, /*#__PURE__*/React.createElement(Settings, {
-    className: "w-4 h-4"
-  })), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setShowChatImport(true),
-    className: "p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900",
-    "aria-label": "Import chats",
-    title: "Import chats"
-  }, /*#__PURE__*/React.createElement(MessageCircle, {
-    className: "w-4 h-4"
-  })), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setShowProfileImport(true),
-    className: "p-1.5 border border-stone-300 text-stone-700 rounded-md hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900",
-    "aria-label": "Import profile",
-    title: "Import profile"
-  }, /*#__PURE__*/React.createElement(Camera, {
-    className: "w-4 h-4"
-  })), /*#__PURE__*/React.createElement("button", {
     onClick: startAddPerson,
-    className: "flex items-center gap-1 bg-stone-900 text-white pl-2 pr-2.5 py-1.5 rounded-md text-sm font-medium hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-900"
+    className: "flex-1 flex flex-col items-center justify-center gap-0.5 bg-stone-900 text-white rounded-md py-1.5 px-1 hover:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-stone-900"
   }, /*#__PURE__*/React.createElement(Plus, {
     className: "w-4 h-4"
-  }), " Add"))), error && /*#__PURE__*/React.createElement("div", {
-    className: "mb-4 text-sm text-red-800 bg-red-50 border border-red-200 rounded-md px-3 py-2"
-  }, error), !loading && people.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "text-[11px] font-medium leading-tight"
+  }, "Add")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowProfileImport(true),
+    className: "flex-1 flex flex-col items-center justify-center gap-0.5 border border-stone-300 text-stone-700 rounded-md py-1.5 px-1 hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }, /*#__PURE__*/React.createElement(Camera, {
+    className: "w-4 h-4"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "text-[11px] font-medium leading-tight"
+  }, "Profile")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowChatImport(true),
+    className: "flex-1 flex flex-col items-center justify-center gap-0.5 border border-stone-300 text-stone-700 rounded-md py-1.5 px-1 hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }, /*#__PURE__*/React.createElement(MessageCircle, {
+    className: "w-4 h-4"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "text-[11px] font-medium leading-tight"
+  }, "Chats")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowInsights(true),
+    className: "flex-1 flex flex-col items-center justify-center gap-0.5 border border-stone-300 text-stone-700 rounded-md py-1.5 px-1 hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }, /*#__PURE__*/React.createElement(TrendingUp, {
+    className: "w-4 h-4"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "text-[11px] font-medium leading-tight"
+  }, "Insights")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowSettings(true),
+    "aria-label": "Settings",
+    title: "Settings",
+    className: "shrink-0 flex items-center justify-center border border-stone-300 text-stone-700 rounded-md px-2.5 hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }, /*#__PURE__*/React.createElement(Settings, {
+    className: "w-4 h-4"
+  })))), !loading && people.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "mb-5 space-y-2"
   }, /*#__PURE__*/React.createElement("div", {
     className: "relative"
@@ -13002,10 +13532,7 @@ function RelationshipTracker() {
     key: f,
     onClick: () => setStageFilter(f),
     className: `text-xs px-2.5 py-1 rounded-full border ${stageFilter === f ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-50'}`
-  }, f)), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setShowInsights(true),
-    className: "text-xs px-2.5 py-1 rounded-full border border-stone-300 bg-white text-stone-600 hover:bg-stone-50 ml-auto"
-  }, "Insights"))), loading && /*#__PURE__*/React.createElement("p", {
+  }, f)))), loading && /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-500"
   }, "Loading…"), !loading && upcoming.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "mb-5 bg-white border border-emerald-200 rounded-lg overflow-hidden"
@@ -13135,9 +13662,20 @@ function RelationshipTracker() {
       className: "text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5"
     }, p.coachRead.vibe), p.myRead && p.myRead.intention && /*#__PURE__*/React.createElement("span", {
       className: "text-[10px] uppercase tracking-wide bg-stone-100 text-stone-600 rounded-full px-2 py-0.5"
-    }, intentionLabel(p.myRead.intention)), (p.coachRead.redFlags || []).length > 0 && /*#__PURE__*/React.createElement("span", {
-      className: "text-[10px] font-semibold rounded-full px-2 py-0.5 bg-amber-50 text-amber-800"
-    }, p.coachRead.redFlags.length, " flag", p.coachRead.redFlags.length === 1 ? '' : 's'), typeof p.coachRead.interestLevel === 'number' && /*#__PURE__*/React.createElement("span", {
+    }, intentionLabel(p.myRead.intention)), (p.coachRead.flags || []).length > 0 && (() => {
+      const reds = p.coachRead.flags.filter(f => f.signal === 'red').length;
+      const greens = p.coachRead.flags.filter(f => f.signal === 'green').length;
+      const ambers = p.coachRead.flags.length - reds - greens;
+      return /*#__PURE__*/React.createElement("span", {
+        className: "flex items-center gap-1"
+      }, greens > 0 && /*#__PURE__*/React.createElement("span", {
+        className: "text-[10px] font-semibold rounded-full px-2 py-0.5 bg-emerald-50 text-emerald-800"
+      }, greens, " green"), ambers > 0 && /*#__PURE__*/React.createElement("span", {
+        className: "text-[10px] font-semibold rounded-full px-2 py-0.5 bg-amber-50 text-amber-800"
+      }, ambers, " watch"), reds > 0 && /*#__PURE__*/React.createElement("span", {
+        className: "text-[10px] font-semibold rounded-full px-2 py-0.5 bg-red-50 text-red-700"
+      }, reds, " red"));
+    })(), typeof p.coachRead.interestLevel === 'number' && /*#__PURE__*/React.createElement("span", {
       className: `text-[10px] font-semibold rounded-full px-2 py-0.5 ${p.coachRead.interestLevel >= 70 ? 'bg-emerald-50 text-emerald-800' : p.coachRead.interestLevel >= 51 ? 'bg-amber-50 text-amber-800' : 'bg-red-50 text-red-700'}`
     }, "Interest ", p.coachRead.interestLevel, "%"), readIsStale(p) && /*#__PURE__*/React.createElement("span", {
       className: "text-[10px] uppercase tracking-wide text-amber-700"
@@ -14665,14 +15203,25 @@ function ConversationSection({
       className: "text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5"
     }, "Most recent")), item.day.summary && /*#__PURE__*/React.createElement("p", {
       className: "text-sm text-stone-800"
-    }, item.day.summary), (item.day.facts || []).length > 0 && /*#__PURE__*/React.createElement("ul", {
-      className: "mt-2 space-y-1"
-    }, item.day.facts.map((f, n) => /*#__PURE__*/React.createElement("li", {
-      key: n,
-      className: "text-sm text-stone-800 flex gap-2"
-    }, /*#__PURE__*/React.createElement("span", {
-      className: "text-stone-300 shrink-0"
-    }, "•"), /*#__PURE__*/React.createElement("span", null, f)))), (item.day.points || []).length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+    }, item.day.summary), (() => {
+      const legacy = (item.day.facts || []).filter(f => !(item.day.sheShared || []).includes(f) && !(item.day.iShared || []).includes(f) && !(item.day.agreed || []).includes(f));
+      const groups = [['She told you', item.day.sheShared || [], 'text-emerald-700'], ['You told her', item.day.iShared || [], 'text-stone-500'], ['Agreed', item.day.agreed || [], 'text-stone-700'], ['Worth remembering', legacy, 'text-stone-500']].filter(g => g[1].length);
+      if (!groups.length) return null;
+      return /*#__PURE__*/React.createElement("div", {
+        className: "mt-2 space-y-1.5"
+      }, groups.map(([label, items, colour]) => /*#__PURE__*/React.createElement("div", {
+        key: label
+      }, /*#__PURE__*/React.createElement("div", {
+        className: `text-[10px] uppercase tracking-wide ${colour}`
+      }, label), /*#__PURE__*/React.createElement("ul", {
+        className: "mt-0.5"
+      }, items.map((f, n) => /*#__PURE__*/React.createElement("li", {
+        key: n,
+        className: "text-sm text-stone-800 flex gap-1.5"
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "text-stone-300 shrink-0"
+      }, "·"), /*#__PURE__*/React.createElement("span", null, f)))))));
+    })(), (item.day.points || []).length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
       onClick: () => setOpenDetail(o => ({
         ...o,
         [key]: !o[key]
@@ -15258,7 +15807,7 @@ function ChatImportModal({
       setMode(match ? 'existing' : 'new');
       setPersonId(match ? match.x.id : people[0] ? people[0].id : '');
       setNewName(p.contactName || '');
-      setDateValue(TODAY());
+      setDateValue(p.earliestCapture && p.earliestCapture <= TODAY() ? p.earliestCapture : TODAY());
       setPhase('review');
     } catch (err) {
       setErrMsg((err && err.fileName ? err.fileName + ': ' : '') + (friendlyExtractError(err) || 'Could not read that screenshot — ' + String(err && err.message || err)));
@@ -15437,14 +15986,21 @@ function ChatImportModal({
   })), /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-stone-500"
   }, "Created at talking stage with no profile", payload.appName ? ` — recorded as ${payload.appName}.` : ' — recorded as met in person. Import a profile later to change that.')), payload.needsDate && /*#__PURE__*/React.createElement(Field, {
-    label: "Date of these messages",
-    hint: (payload.markers || []).length ? 'Chat shows ' + payload.markers.join(', ') : 'No dated divider found'
+    label: (payload.relativeLabels || []).length ? 'It says ' + payload.relativeLabels.slice(0, 2).map(l => '"' + l + '"').join(' and ') + ' — what date is that?' : 'No date in this chat — when was it taken?',
+    hint: payload.earliestCapture ? 'A message here is dated ' + formatDayLabel(payload.earliestCapture) + ', so not before that.' : 'The day you took the screenshot.'
   }, /*#__PURE__*/React.createElement("input", {
     type: "date",
     value: dateValue,
+    max: TODAY(),
+    min: payload.earliestCapture || undefined,
     onChange: e => setDateValue(e.target.value),
     className: selectCls
-  })), results.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }), (payload.relativeLabels || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "mt-1.5 space-y-0.5"
+  }, payload.relativeLabels.slice(0, 4).map((l, i) => /*#__PURE__*/React.createElement("p", {
+    key: i,
+    className: "text-[11px] text-stone-500"
+  }, "\"", l, "\" → ", formatDayLabel(parseDayLabel(l, dateValue) || dateValue))))), results.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-stone-400 border-t border-stone-100 pt-2"
   }, "Done so far: ", results.join(' · ')))), /*#__PURE__*/React.createElement("div", {
     className: "flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 z-50 bg-white rounded-b-lg"
@@ -15460,6 +16016,45 @@ function ChatImportModal({
   }, /*#__PURE__*/React.createElement(Check, {
     className: "w-4 h-4"
   }), " ", queue.length > 1 && qIndex < queue.length - 1 ? 'Save & next' : 'Save')))));
+}
+function CoachPanel({
+  onChanged
+}) {
+  const [keys, setKeys] = useState(selectedCoachKeys);
+  function toggle(k) {
+    const next = keys.includes(k) ? keys.filter(x => x !== k) : [...keys, k];
+    setKeys(next);
+    saveCoachKeys(next);
+    if (onChanged) onChanged();
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    className: "mt-6 pt-4 border-t border-stone-200"
+  }, /*#__PURE__*/React.createElement("h4", {
+    className: "text-sm font-semibold text-stone-700 mb-1"
+  }, "Who coaches you"), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-stone-500 mb-2"
+  }, "The schools the read draws on. Turn one off and its ideas stop appearing. Set per device; takes effect on the next read."), /*#__PURE__*/React.createElement("div", {
+    className: "space-y-1.5"
+  }, COACHES.map(c => {
+    const on = keys.includes(c.key);
+    return /*#__PURE__*/React.createElement("button", {
+      key: c.key,
+      onClick: () => toggle(c.key),
+      className: `w-full text-left flex items-start gap-2.5 border rounded-md px-3 py-2 ${on ? 'border-stone-900 bg-stone-50' : 'border-stone-300 hover:bg-stone-50'}`
+    }, /*#__PURE__*/React.createElement("span", {
+      className: `mt-0.5 w-4 h-4 rounded border shrink-0 flex items-center justify-center ${on ? 'bg-stone-900 border-stone-900' : 'border-stone-400'}`
+    }, on && /*#__PURE__*/React.createElement(Check, {
+      className: "w-3 h-3 text-white"
+    })), /*#__PURE__*/React.createElement("span", {
+      className: "min-w-0"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "block text-sm font-medium text-stone-900"
+    }, c.name), /*#__PURE__*/React.createElement("span", {
+      className: "block text-xs text-stone-500"
+    }, c.note)));
+  })), keys.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-amber-700 mt-2"
+  }, "With none selected the read still works, but it coaches from general judgement rather than any school."));
 }
 function SyncPanel({
   syncState: rawState,
@@ -15867,7 +16462,7 @@ function SettingsModal({
       people
     };
     const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(blob, null, 2));
-    downloadDataUrl(dataUrl, 'relationship-tracker-backup.json');
+    downloadDataUrl(dataUrl, 'spinning-plates-backup.json');
     Local.set('rt:last-export', TODAY());
     if (onExported) onExported(TODAY());
   }
@@ -16005,7 +16600,7 @@ function SettingsModal({
   }, "Version ", APP_VERSION, " · build ", BUILD_STAMP), /*#__PURE__*/React.createElement("button", {
     onClick: onShowChangelog,
     className: "text-xs text-stone-600 underline"
-  }, "Version history")), /*#__PURE__*/React.createElement(LockPanel, {
+  }, "Version history")), /*#__PURE__*/React.createElement(CoachPanel, null), /*#__PURE__*/React.createElement(LockPanel, {
     key: lockVersion,
     onChanged: onLockChanged
   }), /*#__PURE__*/React.createElement(SyncPanel, {
