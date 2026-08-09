@@ -434,7 +434,7 @@ function newPersonRecord(overrides = {}) {
 }
 
 const emptyDateForm = {
-  location: '', date: '', status: 'Upcoming', venues: '',
+  location: '', date: '', time: '', status: 'Upcoming', venues: '',
   chemistry: 0, connection: 0, compatibility: 0, outcome: '', notes: '',
 };
 
@@ -1286,9 +1286,18 @@ const PERSON_EXTRACT_PROMPT = `This is a screenshot from a dating app or messagi
 {"name": string or null, "meetingChannel": string or null (the app name if identifiable, e.g. Hinge, Tinder, Bumble, Instagram, WhatsApp), "dateMet": string or null (YYYY-MM-DD if a date is visible or can reasonably be inferred, else null), "summary": string or null (1-2 sentence summary for his personal dating log, written to him in the second person — "you" and "she", never "he")}
 If a field can't be determined, use null for it. Respond with the JSON object only.`;
 
-const DATE_EXTRACT_PROMPT = `This is a screenshot of a chat conversation, likely about making plans to meet up. Extract what you can and respond with ONLY a JSON object, no other text, no markdown code fences, in exactly this shape:
-{"venue": string or null (a place name mentioned, if any), "proposedDate": string or null (YYYY-MM-DD if a date is visible or can reasonably be inferred, else null), "summary": string or null (1-2 sentence summary of the plan discussed)}
-If a field can't be determined, use null for it. Respond with the JSON object only.`;
+const DATE_EXTRACT_PROMPT = `This is a screenshot of a chat about meeting up. Pull out everything that would go on a diary entry, so it can be confirmed rather than typed. Respond with ONLY a JSON object, no other text, no markdown fences:
+{
+"venue": string or null — the place named, as written ("Aubaile, Blessington").
+"activity": string or null — what was proposed: coffee, dinner, a walk, drinks, the cinema.
+"proposedDate": string or null — YYYY-MM-DD if the day discussed can be worked out. Today's date is given below; resolve "Saturday" or "next Thursday" against it.
+"dayText": string or null — the day as written ("Saturday", "the 14th").
+"proposedTime": string or null — the time as written ("2:30", "half seven", "evening").
+"status": "proposed" or "agreed" or "cancelled" — whether it was actually settled.
+"proposedBy": "she" or "me" or null — who suggested it.
+"summary": string or null — one sentence on where the plan stands.
+}
+Use null for anything not visible. Do not invent a date or a time. Respond with the JSON object only.`;
 
 // Structured profile schema. Each entry: [key, label, group].
 const PROFILE_FIELDS = [
@@ -3351,8 +3360,27 @@ function LockPanel({ onChanged }) {
 // pre-filled event, and the .ics carries a stable UID so re-importing updates
 // the same event rather than creating a second one.
 
+// "2:30", "2.30pm", "14:30" -> "14:30" for a time input.
+function toClockValue(text) {
+  const m = String(text || '').match(/(\d{1,2})[:.](\d{2})\s*(am|pm)?/i);
+  if (!m) return '';
+  let hour = parseInt(m[1], 10);
+  const minute = parseInt(m[2], 10);
+  const ampm = (m[3] || '').toLowerCase();
+  if (ampm === 'pm' && hour < 12) hour += 12;
+  if (ampm === 'am' && hour === 12) hour = 0;
+  if (!ampm && hour < 8) hour += 12;          // an afternoon assumption for dates
+  if (hour > 23 || minute > 59) return '';
+  return String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0');
+}
+
 function dateEventTimes(entry) {
-  // Dates are stored by day; a time may be sitting in the notes ("Time: 2:30").
+  if (entry.time && /^\d{2}:\d{2}$/.test(entry.time)) {
+    const start = new Date(entry.date + 'T00:00:00');
+    start.setHours(Number(entry.time.slice(0, 2)), Number(entry.time.slice(3)), 0, 0);
+    return { start, end: new Date(start.getTime() + 2 * 60 * 60 * 1000) };
+  }
+  // Older entries kept the time in the notes ("Time: 2:30").
   const m = (entry.notes || '').match(/(\d{1,2})[:.](\d{2})\s*(am|pm)?/i);
   let hour = 19, minute = 0;                       // sensible default: evening
   if (m) {
@@ -3579,12 +3607,20 @@ function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickMa
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '2.2.1';
+const APP_VERSION = '2.3.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '2.3.0', date: '2026-08-09', changes: [
+      ['added', 'Profile import can file onto an existing person instead of creating a new one, and suggests the match by name'],
+      ['added', 'Import a profile screenshot from inside a person, from the profile card'],
+      ['added', 'Dates carry a time of their own, used by the calendar export and shown on the timeline'],
+      ['changed', 'Scanning a plans screenshot now suggests venue, activity, day, time, status and who proposed it, for confirmation'],
+    ],
+  },
   {
     version: '2.2.1', date: '2026-08-09', changes: [
       ['fixed', 'With both "Today" and "Yesterday" in a chat, the two were landing more than a day apart — the confirmed capture date was ignored for session labels'],
@@ -4076,6 +4112,7 @@ function RelationshipTracker() {
   const [personEditId, setPersonEditId] = useState(null);
   const [personForm, setPersonForm] = useState(emptyPersonForm);
   const [showProfileImport, setShowProfileImport] = useState(false);
+  const [profileImportTarget, setProfileImportTarget] = useState(null);
   const [showChatImport, setShowChatImport] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -4510,13 +4547,18 @@ function RelationshipTracker() {
         }
       : p));
     setNotice('Updated ' + target.name + ' — profile refreshed, ' + record.photos.length + ' photo' + (record.photos.length === 1 ? '' : 's') + ' added.');
-    if (!more) setSelectedId(targetId);
+    if (!more) {
+      setShowProfileImport(false);
+      setProfileImportTarget(null);
+      setSelectedId(targetId);
+    }
   }
 
   async function handleCreateFromImport(record, more) {
     await persist([record, ...peopleRef.current]);
     if (!more) {
       setShowProfileImport(false);
+      setProfileImportTarget(null);
       setSelectedId(record.id);
     }
   }
@@ -4682,9 +4724,10 @@ function RelationshipTracker() {
         : sug.status === 'proposed' && (!sug.date || isPast) ? 'Proposed'
         : isPast ? 'Completed' : 'Upcoming',
       venues: sug.venue || '',
+      time: toClockValue(sug.timeText),
       chemistry: 0, connection: 0, compatibility: 0,
       outcome: '',
-      notes: [sug.activity, sug.timeText ? 'Time: ' + sug.timeText : '', 'From chat import'].filter(Boolean).join(' — '),
+      notes: [sug.activity, 'From chat import'].filter(Boolean).join(' — '),
     };
     await persist(peopleRef.current.map(p => p.id === selected.id
       ? {
@@ -4849,7 +4892,8 @@ function RelationshipTracker() {
         <ProfileImportModal
           initialFiles={pendingImportFiles && pendingImportFiles.kind === 'profile' ? pendingImportFiles.files : null}
           onConsumedFiles={() => setPendingImportFiles(null)}
-          onCancel={() => setShowProfileImport(false)}
+          lockedTarget={profileImportTarget}
+          onCancel={() => { setShowProfileImport(false); setProfileImportTarget(null); }}
           onCreate={handleCreateFromImport}
           onOverwrite={handleOverwriteFromImport}
           existingPeople={people}
@@ -5017,7 +5061,7 @@ function RelationshipTracker() {
                 {next ? (
                   <div className="bg-white border border-emerald-200 rounded-lg p-3">
                     <div className="text-sm text-emerald-800 font-medium">
-                      Next date {formatDayLabel(next.date)}
+                      Next date {formatDayLabel(next.date)}{next.time ? ' at ' + next.time : ''}
                     </div>
                     <div className="text-sm text-stone-600 mt-0.5">{next.location || 'Venue to be decided'}</div>
                     <button onClick={() => addDateToCalendar(next, 'google')}
@@ -5065,7 +5109,11 @@ function RelationshipTracker() {
             onEdit={() => setShowMyRead(true)}
           />
 
-          <ProfileCard profile={selected.profile || emptyProfile()} onEdit={() => setShowProfileEdit(true)} />
+          <ProfileCard
+            profile={selected.profile || emptyProfile()}
+            onEdit={() => setShowProfileEdit(true)}
+            onImport={() => { setProfileImportTarget(selected.id); setShowProfileImport(true); }}
+          />
 
           <PhotosSection
             photos={selected.photos || []}
@@ -5775,14 +5823,21 @@ function DateFormModal({ form, setForm, isNew, onCancel, onSave, onAddToCalendar
   return (
     <ModalShell title={isNew ? 'Add date' : 'Edit date'} onCancel={onCancel} onSave={onSave}>
       <ScreenshotImport
-        label="Scan a plans/chat screenshot"
-        prompt={DATE_EXTRACT_PROMPT}
+        label="Fill this in from a chat screenshot"
+        prompt={DATE_EXTRACT_PROMPT + '\n\nToday is ' + TODAY() + '.'}
         onExtracted={(fields) => setForm(f => ({
           ...f,
-          location: f.location || fields.venue || f.location,
+          location: f.location || fields.venue || fields.activity || f.location,
           venues: f.venues || fields.venue || f.venues,
           date: f.date || fields.proposedDate || f.date,
-          notes: fields.summary ? (f.notes ? f.notes + '\n' + fields.summary : fields.summary) : f.notes,
+          time: f.time || toClockValue(fields.proposedTime) || f.time,
+          status: f.status === 'Upcoming' && fields.status === 'cancelled' ? 'Cancelled'
+            : f.status === 'Upcoming' && fields.status === 'proposed' && fields.proposedDate && fields.proposedDate < TODAY() ? 'Proposed'
+            : f.status,
+          notes: [f.notes, fields.activity && !f.notes ? fields.activity : '', fields.summary || '',
+            fields.dayText && !fields.proposedDate ? 'Day mentioned: ' + fields.dayText : '',
+            fields.proposedBy ? 'Suggested by ' + (fields.proposedBy === 'me' ? 'me' : 'her') : '']
+            .filter(Boolean).join('\n'),
         }))}
       />
       <Field label="Location *">
@@ -5790,11 +5845,18 @@ function DateFormModal({ form, setForm, isNew, onCancel, onSave, onAddToCalendar
           onFocus={focusScroll} style={fieldScrollMargin}
           className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
       </Field>
-      <Field label="Date">
-        <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
-          onFocus={focusScroll} style={fieldScrollMargin}
-          className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
-      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Date">
+          <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
+            onFocus={focusScroll} style={fieldScrollMargin}
+            className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
+        </Field>
+        <Field label="Time" hint="Optional">
+          <input type="time" value={form.time || ''} onChange={e => setForm(f => ({ ...f, time: e.target.value }))}
+            onFocus={focusScroll} style={fieldScrollMargin}
+            className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
+        </Field>
+      </div>
       <Field label="Status" hint="Date number is worked out automatically. Proposed, Cancelled and No show don't count as dates — they stay on the timeline as evidence.">
         <select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}
           onFocus={focusScroll} style={fieldScrollMargin}
@@ -6256,16 +6318,23 @@ function ProfileReview({ profile: raw, onDropInterest, onDropPrompt }) {
   );
 }
 
-function ProfileCard({ profile: raw, onEdit }) {
+function ProfileCard({ profile: raw, onEdit, onImport }) {
   const profile = { ...emptyProfile(), ...(raw || {}) };
   const empty = profileIsEmpty(profile);
   return (
     <div className="bg-white border border-stone-200 rounded-lg p-4 mb-4">
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-semibold text-stone-700">Profile</h3>
-        <button onClick={onEdit} className="flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100">
-          <Pencil className="w-3.5 h-3.5" /> {empty ? 'Add details' : 'Edit'}
-        </button>
+        <div className="flex gap-1.5">
+          {onImport && (
+            <button onClick={onImport} className="flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100">
+              <Camera className="w-3.5 h-3.5" /> From screenshot
+            </button>
+          )}
+          <button onClick={onEdit} className="flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100">
+            <Pencil className="w-3.5 h-3.5" /> {empty ? 'Add details' : 'Edit'}
+          </button>
+        </div>
       </div>
       {empty ? (
         <p className="text-sm text-stone-500">Nothing recorded yet.</p>
@@ -6827,7 +6896,7 @@ function DateTimelineCard({ entry, isLatest, onEdit, coachNote }) {
       <div className="flex items-center justify-between gap-2 mb-1">
         <span className={`text-xs font-semibold flex items-center gap-1.5 ${happened ? 'text-stone-900' : 'text-stone-500'}`}>
           <MapPin className="w-3.5 h-3.5" />
-          {formatDayLabel(entry.date)} · {entry.status === 'Completed' ? 'met in person'
+          {formatDayLabel(entry.date)}{entry.time ? ' at ' + entry.time : ''} · {entry.status === 'Completed' ? 'met in person'
             : entry.status === 'Proposed' ? 'suggested, never happened'
             : entry.status === 'Upcoming' ? 'booked'
             : entry.status.toLowerCase()}
@@ -6901,7 +6970,7 @@ function useImageIntake(onFiles, active) {
   return { dragging, handlers };
 }
 
-function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, knownChannels, initialFiles, onConsumedFiles }) {
+function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, knownChannels, initialFiles, onConsumedFiles, lockedTarget }) {
   const [phase, setPhase] = useState('upload'); // upload | choose | loading | review | error
   const [errMsg, setErrMsg] = useState('');
   const [progress, setProgress] = useState('');
@@ -6913,9 +6982,12 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
   const [qIndex, setQIndex] = useState(0);
   const [pending, setPending] = useState([]);  // files awaiting the separate/one-profile choice
   const [dupe, setDupe] = useState(null);      // { match, record, more }
+  // Opened from a person's page, the destination is already decided.
+  const [target, setTarget] = useState(lockedTarget || 'new');
   const inputRef = React.useRef(null);
 
   function resetDraft() {
+    setTarget(lockedTarget || 'new');
     setPhotos([]);
     setProfilePhotoId(null);
     setProfile(emptyProfile());
@@ -6933,6 +7005,11 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
       setForm(f => ({ ...emptyPersonForm, ...f, name: name || '' }));
       setPhotos(extractedPhotos);
       setProfilePhotoId(extractedPhotos[0]?.id || null);
+      const match = name
+        ? (existingPeople || []).map(p => ({ p, score: nameSimilarity(name, p.name) }))
+            .filter(x => x.score >= 0.8).sort((a, b) => b.score - a.score)[0]
+        : null;
+      setTarget(lockedTarget || (match ? match.p.id : 'new'));
       setPhase('review');
     } catch (err) {
       const msg = String(err && err.message || err);
@@ -7019,8 +7096,10 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
   }
 
   function handleCreate() {
-    if (!form.name.trim()) { setErrMsg('Name is required.'); return; }
     const { record, more } = buildRecord();
+    // Filing onto someone already in the list needs no name.
+    if (target !== 'new') { finish(record, more, target); return; }
+    if (!form.name.trim()) { setErrMsg('Name is required.'); return; }
     const match = (existingPeople || []).find(p => nameSimilarity(p.name, record.name) >= 0.9);
     if (match) { setDupe({ match, record, more }); return; }
     finish(record, more, null);
@@ -7132,10 +7211,41 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
               )}
               <ProfileReview profile={profile} onDropInterest={dropInterest} onDropPrompt={dropPrompt} />
 
-              <Field label="Name *">
-                <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} onFocus={focusScroll} style={fieldScrollMargin}
-                  className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
-              </Field>
+              {!lockedTarget && (existingPeople || []).length > 0 && (
+                <div>
+                  <div className="flex gap-1.5 mb-2">
+                    <button onClick={() => setTarget('new')}
+                      className={`flex-1 text-sm rounded-md py-2 border ${
+                        target === 'new' ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-300 text-stone-700'
+                      }`}>
+                      New person
+                    </button>
+                    <button onClick={() => setTarget(target === 'new' ? existingPeople[0].id : target)}
+                      className={`flex-1 text-sm rounded-md py-2 border ${
+                        target !== 'new' ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-300 text-stone-700'
+                      }`}>
+                      Existing person
+                    </button>
+                  </div>
+                  {target !== 'new' && (
+                    <Field label="Add this profile to" hint="Details fill any gaps; photos are added. Dates and messages are untouched.">
+                      <select value={target} onChange={e => setTarget(e.target.value)}
+                        className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900">
+                        {existingPeople.map(p => (
+                          <option key={p.id} value={p.id}>{p.name}{p.stage === 'Ended' ? ' (ended)' : ''}</option>
+                        ))}
+                      </select>
+                    </Field>
+                  )}
+                </div>
+              )}
+
+              {target === 'new' && (
+                <Field label="Name *">
+                  <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} onFocus={focusScroll} style={fieldScrollMargin}
+                    className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
+                </Field>
+              )}
               <Field label="Meeting channel">
                 <input value={form.meetingChannel} onChange={e => setForm(f => ({ ...f, meetingChannel: e.target.value }))} onFocus={focusScroll} style={fieldScrollMargin}
                   list="known-channels-import" autoComplete="off" placeholder="e.g. Hinge"
@@ -7166,7 +7276,9 @@ function ProfileImportModal({ onCancel, onCreate, onOverwrite, existingPeople, k
           )}
           {phase === 'review' && (
             <button onClick={handleCreate} className="flex-1 flex items-center justify-center gap-1.5 bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800">
-              <Check className="w-4 h-4" /> {queue.length > 1 && qIndex < queue.length - 1 ? 'Save & next' : 'Create person'}
+              <Check className="w-4 h-4" /> {queue.length > 1 && qIndex < queue.length - 1
+                ? 'Save & next'
+                : target !== 'new' ? 'Add to ' + ((existingPeople.find(p => p.id === target) || {}).name || 'person') : 'Create person'}
             </button>
           )}
         </div>
@@ -8281,6 +8393,7 @@ function newPersonRecord(overrides = {}) {
 const emptyDateForm = {
   location: '',
   date: '',
+  time: '',
   status: 'Upcoming',
   venues: '',
   chemistry: 0,
@@ -9308,9 +9421,18 @@ function fileToBase64(file) {
 const PERSON_EXTRACT_PROMPT = `This is a screenshot from a dating app or messaging app (match screen, profile, or chat history). Extract what you can and respond with ONLY a JSON object, no other text, no markdown code fences, in exactly this shape:
 {"name": string or null, "meetingChannel": string or null (the app name if identifiable, e.g. Hinge, Tinder, Bumble, Instagram, WhatsApp), "dateMet": string or null (YYYY-MM-DD if a date is visible or can reasonably be inferred, else null), "summary": string or null (1-2 sentence summary for his personal dating log, written to him in the second person — "you" and "she", never "he")}
 If a field can't be determined, use null for it. Respond with the JSON object only.`;
-const DATE_EXTRACT_PROMPT = `This is a screenshot of a chat conversation, likely about making plans to meet up. Extract what you can and respond with ONLY a JSON object, no other text, no markdown code fences, in exactly this shape:
-{"venue": string or null (a place name mentioned, if any), "proposedDate": string or null (YYYY-MM-DD if a date is visible or can reasonably be inferred, else null), "summary": string or null (1-2 sentence summary of the plan discussed)}
-If a field can't be determined, use null for it. Respond with the JSON object only.`;
+const DATE_EXTRACT_PROMPT = `This is a screenshot of a chat about meeting up. Pull out everything that would go on a diary entry, so it can be confirmed rather than typed. Respond with ONLY a JSON object, no other text, no markdown fences:
+{
+"venue": string or null — the place named, as written ("Aubaile, Blessington").
+"activity": string or null — what was proposed: coffee, dinner, a walk, drinks, the cinema.
+"proposedDate": string or null — YYYY-MM-DD if the day discussed can be worked out. Today's date is given below; resolve "Saturday" or "next Thursday" against it.
+"dayText": string or null — the day as written ("Saturday", "the 14th").
+"proposedTime": string or null — the time as written ("2:30", "half seven", "evening").
+"status": "proposed" or "agreed" or "cancelled" — whether it was actually settled.
+"proposedBy": "she" or "me" or null — who suggested it.
+"summary": string or null — one sentence on where the plan stands.
+}
+Use null for anything not visible. Do not invent a date or a time. Respond with the JSON object only.`;
 
 // Structured profile schema. Each entry: [key, label, group].
 const PROFILE_FIELDS = [['age', 'Age', 'Basics'], ['hometown', 'From (hometown)', 'Location'], ['location', 'Lives in', 'Location'], ['currentLocation', 'Currently in', 'Location'], ['distanceAway', 'Distance away', 'Location'], ['height', 'Height', 'Basics'], ['pronouns', 'Pronouns', 'Basics'], ['starSign', 'Star sign', 'Basics'], ['jobTitle', 'Job', 'Work & education'], ['workplace', 'Workplace', 'Work & education'], ['education', 'Education', 'Work & education'], ['languages', 'Languages', 'Work & education'], ['children', 'Children', 'Family & intentions'], ['wantsChildren', 'Wants children', 'Family & intentions'], ['relationshipGoal', 'Looking for', 'Family & intentions'], ['relationshipType', 'Relationship type', 'Family & intentions'], ['pets', 'Pets', 'Family & intentions'], ['drinking', 'Drinking', 'Lifestyle'], ['smoking', 'Smoking', 'Lifestyle'], ['cannabis', 'Cannabis', 'Lifestyle'], ['exercise', 'Exercise', 'Lifestyle'], ['diet', 'Diet', 'Lifestyle'], ['religion', 'Religion', 'Beliefs'], ['politics', 'Politics', 'Beliefs'], ['ethnicity', 'Ethnicity', 'Beliefs']];
@@ -11545,8 +11667,29 @@ function LockPanel({
 // pre-filled event, and the .ics carries a stable UID so re-importing updates
 // the same event rather than creating a second one.
 
+// "2:30", "2.30pm", "14:30" -> "14:30" for a time input.
+function toClockValue(text) {
+  const m = String(text || '').match(/(\d{1,2})[:.](\d{2})\s*(am|pm)?/i);
+  if (!m) return '';
+  let hour = parseInt(m[1], 10);
+  const minute = parseInt(m[2], 10);
+  const ampm = (m[3] || '').toLowerCase();
+  if (ampm === 'pm' && hour < 12) hour += 12;
+  if (ampm === 'am' && hour === 12) hour = 0;
+  if (!ampm && hour < 8) hour += 12; // an afternoon assumption for dates
+  if (hour > 23 || minute > 59) return '';
+  return String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0');
+}
 function dateEventTimes(entry) {
-  // Dates are stored by day; a time may be sitting in the notes ("Time: 2:30").
+  if (entry.time && /^\d{2}:\d{2}$/.test(entry.time)) {
+    const start = new Date(entry.date + 'T00:00:00');
+    start.setHours(Number(entry.time.slice(0, 2)), Number(entry.time.slice(3)), 0, 0);
+    return {
+      start,
+      end: new Date(start.getTime() + 2 * 60 * 60 * 1000)
+    };
+  }
+  // Older entries kept the time in the notes ("Time: 2:30").
   const m = (entry.notes || '').match(/(\d{1,2})[:.](\d{2})\s*(am|pm)?/i);
   let hour = 19,
     minute = 0; // sensible default: evening
@@ -11773,12 +11916,16 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '2.2.1';
+const APP_VERSION = '2.3.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '2.3.0',
+  date: '2026-08-09',
+  changes: [['added', 'Profile import can file onto an existing person instead of creating a new one, and suggests the match by name'], ['added', 'Import a profile screenshot from inside a person, from the profile card'], ['added', 'Dates carry a time of their own, used by the calendar export and shown on the timeline'], ['changed', 'Scanning a plans screenshot now suggests venue, activity, day, time, status and who proposed it, for confirmation']]
+}, {
   version: '2.2.1',
   date: '2026-08-09',
   changes: [['fixed', 'With both "Today" and "Yesterday" in a chat, the two were landing more than a day apart — the confirmed capture date was ignored for session labels'], ['changed', 'Only the anchor is asked about now: give the date for "Today" and everything else is worked out from it'], ['changed', 'Progress reads "Analysing timeline" rather than "Looking for dates"'], ['changed', 'Icons load from fixed filenames in the repository, so replacing a file updates the whole app']]
@@ -12136,6 +12283,7 @@ function RelationshipTracker() {
   const [personEditId, setPersonEditId] = useState(null);
   const [personForm, setPersonForm] = useState(emptyPersonForm);
   const [showProfileImport, setShowProfileImport] = useState(false);
+  const [profileImportTarget, setProfileImportTarget] = useState(null);
   const [showChatImport, setShowChatImport] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [query, setQuery] = useState('');
@@ -12689,12 +12837,17 @@ function RelationshipTracker() {
       dateMet: p.dateMet || record.dateMet
     } : p));
     setNotice('Updated ' + target.name + ' — profile refreshed, ' + record.photos.length + ' photo' + (record.photos.length === 1 ? '' : 's') + ' added.');
-    if (!more) setSelectedId(targetId);
+    if (!more) {
+      setShowProfileImport(false);
+      setProfileImportTarget(null);
+      setSelectedId(targetId);
+    }
   }
   async function handleCreateFromImport(record, more) {
     await persist([record, ...peopleRef.current]);
     if (!more) {
       setShowProfileImport(false);
+      setProfileImportTarget(null);
       setSelectedId(record.id);
     }
   }
@@ -12868,11 +13021,12 @@ function RelationshipTracker() {
       // Only ever discussed, and the day has gone by: it never happened.
       : sug.status === 'proposed' && (!sug.date || isPast) ? 'Proposed' : isPast ? 'Completed' : 'Upcoming',
       venues: sug.venue || '',
+      time: toClockValue(sug.timeText),
       chemistry: 0,
       connection: 0,
       compatibility: 0,
       outcome: '',
-      notes: [sug.activity, sug.timeText ? 'Time: ' + sug.timeText : '', 'From chat import'].filter(Boolean).join(' — ')
+      notes: [sug.activity, 'From chat import'].filter(Boolean).join(' — ')
     };
     await persist(peopleRef.current.map(p => p.id === selected.id ? {
       ...p,
@@ -13059,7 +13213,11 @@ function RelationshipTracker() {
   }), showProfileImport && /*#__PURE__*/React.createElement(ProfileImportModal, {
     initialFiles: pendingImportFiles && pendingImportFiles.kind === 'profile' ? pendingImportFiles.files : null,
     onConsumedFiles: () => setPendingImportFiles(null),
-    onCancel: () => setShowProfileImport(false),
+    lockedTarget: profileImportTarget,
+    onCancel: () => {
+      setShowProfileImport(false);
+      setProfileImportTarget(null);
+    },
     onCreate: handleCreateFromImport,
     onOverwrite: handleOverwriteFromImport,
     existingPeople: people,
@@ -13224,7 +13382,7 @@ function RelationshipTracker() {
         className: "bg-white border border-emerald-200 rounded-lg p-3"
       }, /*#__PURE__*/React.createElement("div", {
         className: "text-sm text-emerald-800 font-medium"
-      }, "Next date ", formatDayLabel(next.date)), /*#__PURE__*/React.createElement("div", {
+      }, "Next date ", formatDayLabel(next.date), next.time ? ' at ' + next.time : ''), /*#__PURE__*/React.createElement("div", {
         className: "text-sm text-stone-600 mt-0.5"
       }, next.location || 'Venue to be decided'), /*#__PURE__*/React.createElement("button", {
         onClick: () => addDateToCalendar(next, 'google'),
@@ -13260,7 +13418,11 @@ function RelationshipTracker() {
       onEdit: () => setShowMyRead(true)
     }), /*#__PURE__*/React.createElement(ProfileCard, {
       profile: selected.profile || emptyProfile(),
-      onEdit: () => setShowProfileEdit(true)
+      onEdit: () => setShowProfileEdit(true),
+      onImport: () => {
+        setProfileImportTarget(selected.id);
+        setShowProfileImport(true);
+      }
     }), /*#__PURE__*/React.createElement(PhotosSection, {
       photos: selected.photos || [],
       onView: setLightbox,
@@ -14060,14 +14222,16 @@ function DateFormModal({
     onCancel: onCancel,
     onSave: onSave
   }, /*#__PURE__*/React.createElement(ScreenshotImport, {
-    label: "Scan a plans/chat screenshot",
-    prompt: DATE_EXTRACT_PROMPT,
+    label: "Fill this in from a chat screenshot",
+    prompt: DATE_EXTRACT_PROMPT + '\n\nToday is ' + TODAY() + '.',
     onExtracted: fields => setForm(f => ({
       ...f,
-      location: f.location || fields.venue || f.location,
+      location: f.location || fields.venue || fields.activity || f.location,
       venues: f.venues || fields.venue || f.venues,
       date: f.date || fields.proposedDate || f.date,
-      notes: fields.summary ? f.notes ? f.notes + '\n' + fields.summary : fields.summary : f.notes
+      time: f.time || toClockValue(fields.proposedTime) || f.time,
+      status: f.status === 'Upcoming' && fields.status === 'cancelled' ? 'Cancelled' : f.status === 'Upcoming' && fields.status === 'proposed' && fields.proposedDate && fields.proposedDate < TODAY() ? 'Proposed' : f.status,
+      notes: [f.notes, fields.activity && !f.notes ? fields.activity : '', fields.summary || '', fields.dayText && !fields.proposedDate ? 'Day mentioned: ' + fields.dayText : '', fields.proposedBy ? 'Suggested by ' + (fields.proposedBy === 'me' ? 'me' : 'her') : ''].filter(Boolean).join('\n')
     }))
   }), /*#__PURE__*/React.createElement(Field, {
     label: "Location *"
@@ -14080,7 +14244,9 @@ function DateFormModal({
     onFocus: focusScroll,
     style: fieldScrollMargin,
     className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
-  })), /*#__PURE__*/React.createElement(Field, {
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-2"
+  }, /*#__PURE__*/React.createElement(Field, {
     label: "Date"
   }, /*#__PURE__*/React.createElement("input", {
     type: "date",
@@ -14093,6 +14259,19 @@ function DateFormModal({
     style: fieldScrollMargin,
     className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
   })), /*#__PURE__*/React.createElement(Field, {
+    label: "Time",
+    hint: "Optional"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "time",
+    value: form.time || '',
+    onChange: e => setForm(f => ({
+      ...f,
+      time: e.target.value
+    })),
+    onFocus: focusScroll,
+    style: fieldScrollMargin,
+    className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }))), /*#__PURE__*/React.createElement(Field, {
     label: "Status",
     hint: "Date number is worked out automatically. Proposed, Cancelled and No show don't count as dates — they stay on the timeline as evidence."
   }, /*#__PURE__*/React.createElement("select", {
@@ -14682,7 +14861,8 @@ function ProfileReview({
 }
 function ProfileCard({
   profile: raw,
-  onEdit
+  onEdit,
+  onImport
 }) {
   const profile = {
     ...emptyProfile(),
@@ -14695,12 +14875,19 @@ function ProfileCard({
     className: "flex items-center justify-between mb-2"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "text-sm font-semibold text-stone-700"
-  }, "Profile"), /*#__PURE__*/React.createElement("button", {
+  }, "Profile"), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1.5"
+  }, onImport && /*#__PURE__*/React.createElement("button", {
+    onClick: onImport,
+    className: "flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100"
+  }, /*#__PURE__*/React.createElement(Camera, {
+    className: "w-3.5 h-3.5"
+  }), " From screenshot"), /*#__PURE__*/React.createElement("button", {
     onClick: onEdit,
     className: "flex items-center gap-1.5 text-sm font-medium text-stone-700 border border-stone-300 rounded-md px-2.5 py-1 hover:bg-stone-100"
   }, /*#__PURE__*/React.createElement(Pencil, {
     className: "w-3.5 h-3.5"
-  }), " ", empty ? 'Add details' : 'Edit')), empty ? /*#__PURE__*/React.createElement("p", {
+  }), " ", empty ? 'Add details' : 'Edit'))), empty ? /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-500"
   }, "Nothing recorded yet.") : /*#__PURE__*/React.createElement("div", {
     className: "space-y-3"
@@ -15364,7 +15551,7 @@ function DateTimelineCard({
     className: `text-xs font-semibold flex items-center gap-1.5 ${happened ? 'text-stone-900' : 'text-stone-500'}`
   }, /*#__PURE__*/React.createElement(MapPin, {
     className: "w-3.5 h-3.5"
-  }), formatDayLabel(entry.date), " · ", entry.status === 'Completed' ? 'met in person' : entry.status === 'Proposed' ? 'suggested, never happened' : entry.status === 'Upcoming' ? 'booked' : entry.status.toLowerCase()), /*#__PURE__*/React.createElement("button", {
+  }), formatDayLabel(entry.date), entry.time ? ' at ' + entry.time : '', " · ", entry.status === 'Completed' ? 'met in person' : entry.status === 'Proposed' ? 'suggested, never happened' : entry.status === 'Upcoming' ? 'booked' : entry.status.toLowerCase()), /*#__PURE__*/React.createElement("button", {
     onClick: onEdit,
     className: "text-xs text-stone-500 hover:text-stone-900 shrink-0"
   }, "Edit")), /*#__PURE__*/React.createElement("p", {
@@ -15440,7 +15627,8 @@ function ProfileImportModal({
   existingPeople,
   knownChannels,
   initialFiles,
-  onConsumedFiles
+  onConsumedFiles,
+  lockedTarget
 }) {
   const [phase, setPhase] = useState('upload'); // upload | choose | loading | review | error
   const [errMsg, setErrMsg] = useState('');
@@ -15453,8 +15641,11 @@ function ProfileImportModal({
   const [qIndex, setQIndex] = useState(0);
   const [pending, setPending] = useState([]); // files awaiting the separate/one-profile choice
   const [dupe, setDupe] = useState(null); // { match, record, more }
+  // Opened from a person's page, the destination is already decided.
+  const [target, setTarget] = useState(lockedTarget || 'new');
   const inputRef = React.useRef(null);
   function resetDraft() {
+    setTarget(lockedTarget || 'new');
     setPhotos([]);
     setProfilePhotoId(null);
     setProfile(emptyProfile());
@@ -15479,6 +15670,11 @@ function ProfileImportModal({
       }));
       setPhotos(extractedPhotos);
       setProfilePhotoId(extractedPhotos[0]?.id || null);
+      const match = name ? (existingPeople || []).map(p => ({
+        p,
+        score: nameSimilarity(name, p.name)
+      })).filter(x => x.score >= 0.8).sort((a, b) => b.score - a.score)[0] : null;
+      setTarget(lockedTarget || (match ? match.p.id : 'new'));
       setPhase('review');
     } catch (err) {
       const msg = String(err && err.message || err);
@@ -15573,14 +15769,19 @@ function ProfileImportModal({
     };
   }
   function handleCreate() {
-    if (!form.name.trim()) {
-      setErrMsg('Name is required.');
-      return;
-    }
     const {
       record,
       more
     } = buildRecord();
+    // Filing onto someone already in the list needs no name.
+    if (target !== 'new') {
+      finish(record, more, target);
+      return;
+    }
+    if (!form.name.trim()) {
+      setErrMsg('Name is required.');
+      return;
+    }
     const match = (existingPeople || []).find(p => nameSimilarity(p.name, record.name) >= 0.9);
     if (match) {
       setDupe({
@@ -15713,7 +15914,25 @@ function ProfileImportModal({
     profile: profile,
     onDropInterest: dropInterest,
     onDropPrompt: dropPrompt
-  }), /*#__PURE__*/React.createElement(Field, {
+  }), !lockedTarget && (existingPeople || []).length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1.5 mb-2"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setTarget('new'),
+    className: `flex-1 text-sm rounded-md py-2 border ${target === 'new' ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-300 text-stone-700'}`
+  }, "New person"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setTarget(target === 'new' ? existingPeople[0].id : target),
+    className: `flex-1 text-sm rounded-md py-2 border ${target !== 'new' ? 'bg-stone-900 text-white border-stone-900' : 'border-stone-300 text-stone-700'}`
+  }, "Existing person")), target !== 'new' && /*#__PURE__*/React.createElement(Field, {
+    label: "Add this profile to",
+    hint: "Details fill any gaps; photos are added. Dates and messages are untouched."
+  }, /*#__PURE__*/React.createElement("select", {
+    value: target,
+    onChange: e => setTarget(e.target.value),
+    className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }, existingPeople.map(p => /*#__PURE__*/React.createElement("option", {
+    key: p.id,
+    value: p.id
+  }, p.name, p.stage === 'Ended' ? ' (ended)' : ''))))), target === 'new' && /*#__PURE__*/React.createElement(Field, {
     label: "Name *"
   }, /*#__PURE__*/React.createElement("input", {
     value: form.name,
@@ -15792,7 +16011,7 @@ function ProfileImportModal({
     className: "flex-1 flex items-center justify-center gap-1.5 bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800"
   }, /*#__PURE__*/React.createElement(Check, {
     className: "w-4 h-4"
-  }), " ", queue.length > 1 && qIndex < queue.length - 1 ? 'Save & next' : 'Create person'))));
+  }), " ", queue.length > 1 && qIndex < queue.length - 1 ? 'Save & next' : target !== 'new' ? 'Add to ' + ((existingPeople.find(p => p.id === target) || {}).name || 'person') : 'Create person'))));
 }
 
 // ---------- Bulk chat import (from the home screen) ----------
