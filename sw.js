@@ -7,7 +7,7 @@
 // It does NOT cache index.html aggressively. A stale build is worse than a slow
 // one, so the network is always tried first and the cache is only a fallback.
 
-const CACHE = 'rt-shell-v2';
+const CACHE = 'rt-shell-v3';
 const SHARE_CACHE = 'rt-shared';
 
 self.addEventListener('install', (event) => {
@@ -18,8 +18,9 @@ self.addEventListener('install', (event) => {
       './',
       './index.html',
       './manifest.webmanifest',
-      './icon-192.png',
-      './icon-512.png',
+      './icon-192-v2.png',
+      './icon-512-v2.png',
+      './logo-v2.png',
     ]).catch(() => undefined))
   );
 });
