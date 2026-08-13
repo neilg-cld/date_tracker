@@ -689,7 +689,17 @@ function personAvg(person) {
   return avgs.reduce((a, b) => a + b, 0) / avgs.length;
 }
 
-const TODAY = () => new Date().toISOString().slice(0, 10);
+// Dates here are calendar days in the user's own timezone. toISOString() converts
+// to UTC first, which in Irish summer time turns local midnight into 23:00 the
+// day before — so every shift lost a day. Everything formats locally instead.
+function isoLocal(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
+const TODAY = () => isoLocal(new Date());
 
 function daysBetween(isoA, isoB) {
   const a = new Date(isoA + 'T00:00:00'), b = new Date(isoB + 'T00:00:00');
@@ -1743,7 +1753,7 @@ function resolveDayText(dayText, fromDate) {
 function shiftDate(iso, days) {
   const d = new Date(iso + 'T00:00:00');
   d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  return isoLocal(d);
 }
 
 // How closely two names match, for flagging a chat imported onto the wrong person.
@@ -2068,6 +2078,16 @@ function relativeRank(label) {
   if (/today|tonight/.test(t)) return 0;
   if (/yesterday/.test(t)) return 1;
   return 2;
+}
+
+// If he tells us the date of "Yesterday", the screenshot was taken the day
+// after. This converts the answer he gives into the capture date.
+function captureFromLabel(label, labelDate) {
+  if (!labelDate) return '';
+  const t = String(label || '').toLowerCase();
+  if (/yesterday/.test(t)) return shiftDate(labelDate, 1);
+  if (/tomorrow/.test(t)) return shiftDate(labelDate, -1);
+  return labelDate;                     // "Today", a weekday, or nothing named
 }
 
 function anchorLabel(labels) {
@@ -3677,12 +3697,19 @@ function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickMa
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.4.1';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '2.4.1', date: '2026-08-11', changes: [
+      ['fixed', 'Every date shift was landing a day early: local midnight was being converted to UTC, which is the day before in Irish summer time'],
+      ['changed', 'The date question now asks about the words on screen — "The chat says Yesterday. What date was that?" — and works the capture date out itself'],
+      ['added', 'The dialog shows what every other divider becomes, and states the screenshot date it has settled on'],
+    ],
+  },
   {
     version: '2.4.0', date: '2026-08-09', changes: [
       ['added', 'An intimacy rating on dates and written-up encounters — five hearts, understated labels'],
@@ -6048,70 +6075,81 @@ function ChatDateConfirmModal({ info, onCancel, onConfirm }) {
   const { payload } = info;
   const labels = payload.relativeLabels || [];
   const floor = payload.earliestCapture || '';
-  // Default to the last date the image is certain about, since the screenshot
-  // cannot have been taken before it.
-  const [date, setDate] = useState(floor && floor <= TODAY() ? floor : TODAY());
-  const tooEarly = floor && date < floor;
-
   const anchor = anchorLabel(labels);
-  const derived = labels.filter(l => l !== anchor);
-  const headline = anchor
-    ? 'It says "' + anchor + '" — what date is that?'
-    : 'No date in this chat — when was it taken?';
+  const others = labels.filter(l => l !== anchor);
+
+  // He answers about the words on screen — "Yesterday was the 9th" — and the
+  // capture date is worked out from that. Asking for two different things in one
+  // box was the confusion.
+  const isYesterday = /yesterday/i.test(anchor);
+  const defaultAnswer = isYesterday ? shiftDate(TODAY(), -1) : TODAY();
+  const [answer, setAnswer] = useState(defaultAnswer);
+
+  const capture = captureFromLabel(anchor, answer);
+  const tooEarly = floor && capture < floor;
+
+  const quick = isYesterday
+    ? [['Yesterday', shiftDate(TODAY(), -1)], ['Two days ago', shiftDate(TODAY(), -2)], ['A week ago', shiftDate(TODAY(), -7)]]
+    : [['Today', TODAY()], ['Yesterday', shiftDate(TODAY(), -1)], ['A week ago', shiftDate(TODAY(), -7)]];
 
   return (
     <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
       <div className="bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto">
-        <div className="flex items-center gap-2 mb-2">
-          <Calendar className="w-4 h-4 text-stone-600" />
-          <h3 className="font-serif text-lg">{headline}</h3>
+        <div className="flex items-start gap-2 mb-2">
+          <Calendar className="w-4 h-4 text-stone-600 mt-1 shrink-0" />
+          <h3 className="font-serif text-lg leading-tight">
+            {anchor ? 'The chat says "' + anchor + '". What date was that?' : 'When was this screenshot taken?'}
+          </h3>
         </div>
 
         <p className="text-sm text-stone-700">
-          Give the day you took the screenshot.
-          {derived.length
-            ? ' ' + derived.map(l => '"' + l + '"').join(' and ') + ' will be worked out from it.'
-            : ' Words like this are relative to that day, and there is no way to tell it from the image.'}
+          {anchor
+            ? 'Pick the actual date those messages were sent. Everything else in the chat follows from it.'
+            : 'No date could be read from this chat, so give the day you took the screenshot.'}
         </p>
-        {floor && (
-          <p className="text-xs text-stone-500 mt-1.5">
-            This chat carries a message dated {formatDayLabel(floor)}, so it cannot have been taken before then.
-          </p>
-        )}
 
-        <input type="date" value={date} min={floor || undefined} max={TODAY()}
-          onChange={e => setDate(e.target.value)}
+        <input type="date" value={answer} max={TODAY()}
+          onChange={e => setAnswer(e.target.value)}
           className="mt-3 w-full border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900" />
 
         <div className="mt-2 flex gap-1.5 flex-wrap">
-          {[['Today', TODAY()], ['Yesterday', shiftDate(TODAY(), -1)], ['A week ago', shiftDate(TODAY(), -7)]]
-            .filter(([, d]) => !floor || d >= floor)
-            .map(([label, d]) => (
-              <button key={label} onClick={() => setDate(d)}
-                className={`text-xs px-2.5 py-1 rounded-full border ${
-                  date === d ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300'
-                }`}>
-                {label}
-              </button>
-            ))}
+          {quick.map(([label, d]) => (
+            <button key={label} onClick={() => setAnswer(d)}
+              className={`text-xs px-2.5 py-1 rounded-full border ${
+                answer === d ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300'
+              }`}>
+              {label}
+            </button>
+          ))}
         </div>
 
-        {labels.length > 0 && (
+        {(others.length > 0 || anchor) && (
           <div className="mt-3 border-t border-stone-100 pt-2 space-y-0.5">
-            {labels.slice(0, 5).map((l, i) => (
+            {anchor && (
+              <p className="text-[11px] text-stone-500">
+                "{anchor}" → {formatDayLabel(answer)}
+              </p>
+            )}
+            {others.map((l, i) => (
               <p key={i} className="text-[11px] text-stone-500">
-                "{l}" → {formatDayLabel(parseDayLabel(l, date) || date)}
+                "{l}" → {formatDayLabel(parseDayLabel(l, capture) || capture)}
               </p>
             ))}
+            <p className="text-[11px] text-stone-400 pt-1">
+              Screenshot taken {formatDayLabel(capture)}.
+            </p>
           </div>
         )}
+
         {tooEarly && (
-          <p className="text-xs text-red-700 mt-2">That is before a message already dated in this chat.</p>
+          <p className="text-xs text-red-700 mt-2">
+            That would put the screenshot before {formatDayLabel(floor)}, which is a date already in this chat.
+          </p>
         )}
 
         <div className="mt-4 flex gap-2">
           <button onClick={onCancel} className="flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">Cancel</button>
-          <button onClick={() => onConfirm(date)} disabled={tooEarly}
+          <button onClick={() => onConfirm(capture)} disabled={tooEarly || !answer}
             className="flex-1 bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800 disabled:opacity-50">
             Save
           </button>
@@ -7425,7 +7463,7 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
       setMode(match ? 'existing' : 'new');
       setPersonId(match ? match.x.id : (people[0] ? people[0].id : ''));
       setNewName(p.contactName || '');
-      setDateValue(p.earliestCapture && p.earliestCapture <= TODAY() ? p.earliestCapture : TODAY());
+      setDateValue(/yesterday/i.test(anchorLabel(p.relativeLabels || [])) ? shiftDate(TODAY(), -1) : TODAY());
       setPhase('review');
     } catch (err) {
       setErrMsg((err && err.fileName ? err.fileName + ': ' : '')
@@ -7480,7 +7518,10 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
     }
     setPhase('loading');
     setProgress('Saving…');
-    const res = await onCommit(payload, targetId, payload.needsDate ? dateValue : null);
+    const capture = payload.needsDate
+      ? captureFromLabel(anchorLabel(payload.relativeLabels || []), dateValue)
+      : null;
+    const res = await onCommit(payload, targetId, capture);
     next(qIndex, label + ' — ' + res.added + ' line' + (res.added === 1 ? '' : 's')
       + (res.dropped ? ', ' + res.dropped + ' duplicate' + (res.dropped === 1 ? '' : 's') + ' skipped' : ''));
   }
@@ -7622,29 +7663,30 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
                 </>
               )}
 
-              {payload.needsDate && (
-                <Field
-                  label={(payload.relativeLabels || []).length
-                    ? 'It says "' + anchorLabel(payload.relativeLabels) + '" — what date is that?'
-                    : 'No date in this chat — when was it taken?'}
-                  hint={payload.earliestCapture
-                    ? 'A message here is dated ' + formatDayLabel(payload.earliestCapture) + ', so not before that.'
-                    : 'The day you took the screenshot.'}
-                >
-                  <input type="date" value={dateValue} max={TODAY()}
-                    min={payload.earliestCapture || undefined}
-                    onChange={e => setDateValue(e.target.value)} className={selectCls} />
-                  {(payload.relativeLabels || []).length > 0 && (
-                    <div className="mt-1.5 space-y-0.5">
-                      {payload.relativeLabels.slice(0, 4).map((l, i) => (
-                        <p key={i} className="text-[11px] text-stone-500">
-                          "{l}" → {formatDayLabel(parseDayLabel(l, dateValue) || dateValue)}
-                        </p>
-                      ))}
-                    </div>
-                  )}
-                </Field>
-              )}
+              {payload.needsDate && (() => {
+                  const labels = payload.relativeLabels || [];
+                  const anchor = anchorLabel(labels);
+                  const capture = captureFromLabel(anchor, dateValue);
+                  return (
+                    <Field
+                      label={anchor
+                        ? 'The chat says "' + anchor + '". What date was that?'
+                        : 'No date in this chat — when was it taken?'}
+                      hint="Everything else follows from this."
+                    >
+                      <input type="date" value={dateValue} max={TODAY()}
+                        onChange={e => setDateValue(e.target.value)} className={selectCls} />
+                      <div className="mt-1.5 space-y-0.5">
+                        {labels.filter(l => l !== anchor).slice(0, 3).map((l, i) => (
+                          <p key={i} className="text-[11px] text-stone-500">
+                            "{l}" → {formatDayLabel(parseDayLabel(l, capture) || capture)}
+                          </p>
+                        ))}
+                        <p className="text-[11px] text-stone-400">Screenshot taken {formatDayLabel(capture)}.</p>
+                      </div>
+                    </Field>
+                  );
+                })()}
 
               {results.length > 0 && (
                 <div className="text-xs text-stone-400 border-t border-stone-100 pt-2">
@@ -8846,7 +8888,17 @@ function personAvg(person) {
   if (avgs.length === 0) return null;
   return avgs.reduce((a, b) => a + b, 0) / avgs.length;
 }
-const TODAY = () => new Date().toISOString().slice(0, 10);
+
+// Dates here are calendar days in the user's own timezone. toISOString() converts
+// to UTC first, which in Irish summer time turns local midnight into 23:00 the
+// day before — so every shift lost a day. Everything formats locally instead.
+function isoLocal(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+const TODAY = () => isoLocal(new Date());
 function daysBetween(isoA, isoB) {
   const a = new Date(isoA + 'T00:00:00'),
     b = new Date(isoB + 'T00:00:00');
@@ -10025,7 +10077,7 @@ function resolveDayText(dayText, fromDate) {
 function shiftDate(iso, days) {
   const d = new Date(iso + 'T00:00:00');
   d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  return isoLocal(d);
 }
 
 // How closely two names match, for flagging a chat imported onto the wrong person.
@@ -10418,6 +10470,16 @@ function relativeRank(label) {
   if (/today|tonight/.test(t)) return 0;
   if (/yesterday/.test(t)) return 1;
   return 2;
+}
+
+// If he tells us the date of "Yesterday", the screenshot was taken the day
+// after. This converts the answer he gives into the capture date.
+function captureFromLabel(label, labelDate) {
+  if (!labelDate) return '';
+  const t = String(label || '').toLowerCase();
+  if (/yesterday/.test(t)) return shiftDate(labelDate, 1);
+  if (/tomorrow/.test(t)) return shiftDate(labelDate, -1);
+  return labelDate; // "Today", a weekday, or nothing named
 }
 function anchorLabel(labels) {
   const sorted = [...(labels || [])].sort((a, b) => relativeRank(a) - relativeRank(b));
@@ -12126,12 +12188,16 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.4.1';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '2.4.1',
+  date: '2026-08-11',
+  changes: [['fixed', 'Every date shift was landing a day early: local midnight was being converted to UTC, which is the day before in Irish summer time'], ['changed', 'The date question now asks about the words on screen — "The chat says Yesterday. What date was that?" — and works the capture date out itself'], ['added', 'The dialog shows what every other divider becomes, and states the screenshot date it has settled on']]
+}, {
   version: '2.4.0',
   date: '2026-08-09',
   changes: [['added', 'An intimacy rating on dates and written-up encounters — five hearts, understated labels'], ['added', 'The read weighs physical progression: direction, stalling, and whether it is running ahead of everything else'], ['added', 'Insights shows how far things have gone with each person']]
@@ -14661,55 +14727,61 @@ function ChatDateConfirmModal({
   } = info;
   const labels = payload.relativeLabels || [];
   const floor = payload.earliestCapture || '';
-  // Default to the last date the image is certain about, since the screenshot
-  // cannot have been taken before it.
-  const [date, setDate] = useState(floor && floor <= TODAY() ? floor : TODAY());
-  const tooEarly = floor && date < floor;
   const anchor = anchorLabel(labels);
-  const derived = labels.filter(l => l !== anchor);
-  const headline = anchor ? 'It says "' + anchor + '" — what date is that?' : 'No date in this chat — when was it taken?';
+  const others = labels.filter(l => l !== anchor);
+
+  // He answers about the words on screen — "Yesterday was the 9th" — and the
+  // capture date is worked out from that. Asking for two different things in one
+  // box was the confusion.
+  const isYesterday = /yesterday/i.test(anchor);
+  const defaultAnswer = isYesterday ? shiftDate(TODAY(), -1) : TODAY();
+  const [answer, setAnswer] = useState(defaultAnswer);
+  const capture = captureFromLabel(anchor, answer);
+  const tooEarly = floor && capture < floor;
+  const quick = isYesterday ? [['Yesterday', shiftDate(TODAY(), -1)], ['Two days ago', shiftDate(TODAY(), -2)], ['A week ago', shiftDate(TODAY(), -7)]] : [['Today', TODAY()], ['Yesterday', shiftDate(TODAY(), -1)], ['A week ago', shiftDate(TODAY(), -7)]];
   return /*#__PURE__*/React.createElement("div", {
     className: "fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4"
   }, /*#__PURE__*/React.createElement("div", {
     className: "bg-white rounded-lg max-w-sm w-full p-4 max-h-full overflow-y-auto"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-2 mb-2"
+    className: "flex items-start gap-2 mb-2"
   }, /*#__PURE__*/React.createElement(Calendar, {
-    className: "w-4 h-4 text-stone-600"
+    className: "w-4 h-4 text-stone-600 mt-1 shrink-0"
   }), /*#__PURE__*/React.createElement("h3", {
-    className: "font-serif text-lg"
-  }, headline)), /*#__PURE__*/React.createElement("p", {
+    className: "font-serif text-lg leading-tight"
+  }, anchor ? 'The chat says "' + anchor + '". What date was that?' : 'When was this screenshot taken?')), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-700"
-  }, "Give the day you took the screenshot.", derived.length ? ' ' + derived.map(l => '"' + l + '"').join(' and ') + ' will be worked out from it.' : ' Words like this are relative to that day, and there is no way to tell it from the image.'), floor && /*#__PURE__*/React.createElement("p", {
-    className: "text-xs text-stone-500 mt-1.5"
-  }, "This chat carries a message dated ", formatDayLabel(floor), ", so it cannot have been taken before then."), /*#__PURE__*/React.createElement("input", {
+  }, anchor ? 'Pick the actual date those messages were sent. Everything else in the chat follows from it.' : 'No date could be read from this chat, so give the day you took the screenshot.'), /*#__PURE__*/React.createElement("input", {
     type: "date",
-    value: date,
-    min: floor || undefined,
+    value: answer,
     max: TODAY(),
-    onChange: e => setDate(e.target.value),
+    onChange: e => setAnswer(e.target.value),
     className: "mt-3 w-full border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-stone-900"
   }), /*#__PURE__*/React.createElement("div", {
     className: "mt-2 flex gap-1.5 flex-wrap"
-  }, [['Today', TODAY()], ['Yesterday', shiftDate(TODAY(), -1)], ['A week ago', shiftDate(TODAY(), -7)]].filter(([, d]) => !floor || d >= floor).map(([label, d]) => /*#__PURE__*/React.createElement("button", {
+  }, quick.map(([label, d]) => /*#__PURE__*/React.createElement("button", {
     key: label,
-    onClick: () => setDate(d),
-    className: `text-xs px-2.5 py-1 rounded-full border ${date === d ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300'}`
-  }, label))), labels.length > 0 && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setAnswer(d),
+    className: `text-xs px-2.5 py-1 rounded-full border ${answer === d ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300'}`
+  }, label))), (others.length > 0 || anchor) && /*#__PURE__*/React.createElement("div", {
     className: "mt-3 border-t border-stone-100 pt-2 space-y-0.5"
-  }, labels.slice(0, 5).map((l, i) => /*#__PURE__*/React.createElement("p", {
+  }, anchor && /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-stone-500"
+  }, "\"", anchor, "\" → ", formatDayLabel(answer)), others.map((l, i) => /*#__PURE__*/React.createElement("p", {
     key: i,
     className: "text-[11px] text-stone-500"
-  }, "\"", l, "\" → ", formatDayLabel(parseDayLabel(l, date) || date)))), tooEarly && /*#__PURE__*/React.createElement("p", {
+  }, "\"", l, "\" → ", formatDayLabel(parseDayLabel(l, capture) || capture))), /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-stone-400 pt-1"
+  }, "Screenshot taken ", formatDayLabel(capture), ".")), tooEarly && /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-red-700 mt-2"
-  }, "That is before a message already dated in this chat."), /*#__PURE__*/React.createElement("div", {
+  }, "That would put the screenshot before ", formatDayLabel(floor), ", which is a date already in this chat."), /*#__PURE__*/React.createElement("div", {
     className: "mt-4 flex gap-2"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: onCancel,
     className: "flex-1 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
   }, "Cancel"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => onConfirm(date),
-    disabled: tooEarly,
+    onClick: () => onConfirm(capture),
+    disabled: tooEarly || !answer,
     className: "flex-1 bg-stone-900 text-white rounded-md py-2 text-sm font-medium hover:bg-stone-800 disabled:opacity-50"
   }, "Save"))));
 }
@@ -16295,7 +16367,7 @@ function ChatImportModal({
       setMode(match ? 'existing' : 'new');
       setPersonId(match ? match.x.id : people[0] ? people[0].id : '');
       setNewName(p.contactName || '');
-      setDateValue(p.earliestCapture && p.earliestCapture <= TODAY() ? p.earliestCapture : TODAY());
+      setDateValue(/yesterday/i.test(anchorLabel(p.relativeLabels || [])) ? shiftDate(TODAY(), -1) : TODAY());
       setPhase('review');
     } catch (err) {
       setErrMsg((err && err.fileName ? err.fileName + ': ' : '') + (friendlyExtractError(err) || 'Could not read that screenshot — ' + String(err && err.message || err)));
@@ -16353,7 +16425,8 @@ function ChatImportModal({
     }
     setPhase('loading');
     setProgress('Saving…');
-    const res = await onCommit(payload, targetId, payload.needsDate ? dateValue : null);
+    const capture = payload.needsDate ? captureFromLabel(anchorLabel(payload.relativeLabels || []), dateValue) : null;
+    const res = await onCommit(payload, targetId, capture);
     next(qIndex, label + ' — ' + res.added + ' line' + (res.added === 1 ? '' : 's') + (res.dropped ? ', ' + res.dropped + ' duplicate' + (res.dropped === 1 ? '' : 's') + ' skipped' : ''));
   }
   const selectCls = "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900";
@@ -16473,22 +16546,28 @@ function ChatImportModal({
     className: selectCls
   })), /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-stone-500"
-  }, "Created at talking stage with no profile", payload.appName ? ` — recorded as ${payload.appName}.` : ' — recorded as met in person. Import a profile later to change that.')), payload.needsDate && /*#__PURE__*/React.createElement(Field, {
-    label: (payload.relativeLabels || []).length ? 'It says "' + anchorLabel(payload.relativeLabels) + '" — what date is that?' : 'No date in this chat — when was it taken?',
-    hint: payload.earliestCapture ? 'A message here is dated ' + formatDayLabel(payload.earliestCapture) + ', so not before that.' : 'The day you took the screenshot.'
-  }, /*#__PURE__*/React.createElement("input", {
-    type: "date",
-    value: dateValue,
-    max: TODAY(),
-    min: payload.earliestCapture || undefined,
-    onChange: e => setDateValue(e.target.value),
-    className: selectCls
-  }), (payload.relativeLabels || []).length > 0 && /*#__PURE__*/React.createElement("div", {
-    className: "mt-1.5 space-y-0.5"
-  }, payload.relativeLabels.slice(0, 4).map((l, i) => /*#__PURE__*/React.createElement("p", {
-    key: i,
-    className: "text-[11px] text-stone-500"
-  }, "\"", l, "\" → ", formatDayLabel(parseDayLabel(l, dateValue) || dateValue))))), results.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "Created at talking stage with no profile", payload.appName ? ` — recorded as ${payload.appName}.` : ' — recorded as met in person. Import a profile later to change that.')), payload.needsDate && (() => {
+    const labels = payload.relativeLabels || [];
+    const anchor = anchorLabel(labels);
+    const capture = captureFromLabel(anchor, dateValue);
+    return /*#__PURE__*/React.createElement(Field, {
+      label: anchor ? 'The chat says "' + anchor + '". What date was that?' : 'No date in this chat — when was it taken?',
+      hint: "Everything else follows from this."
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "date",
+      value: dateValue,
+      max: TODAY(),
+      onChange: e => setDateValue(e.target.value),
+      className: selectCls
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "mt-1.5 space-y-0.5"
+    }, labels.filter(l => l !== anchor).slice(0, 3).map((l, i) => /*#__PURE__*/React.createElement("p", {
+      key: i,
+      className: "text-[11px] text-stone-500"
+    }, "\"", l, "\" → ", formatDayLabel(parseDayLabel(l, capture) || capture))), /*#__PURE__*/React.createElement("p", {
+      className: "text-[11px] text-stone-400"
+    }, "Screenshot taken ", formatDayLabel(capture), ".")));
+  })(), results.length > 0 && /*#__PURE__*/React.createElement("div", {
     className: "text-xs text-stone-400 border-t border-stone-100 pt-2"
   }, "Done so far: ", results.join(' · ')))), /*#__PURE__*/React.createElement("div", {
     className: "flex gap-2 px-4 py-3 border-t border-stone-200 sticky bottom-0 z-50 bg-white rounded-b-lg"
