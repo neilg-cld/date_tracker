@@ -1934,8 +1934,11 @@ async function extractChatPayload(files, onProgress) {
         w => imageWarnings.push(w), m => { dateMarkers = dateMarkers.concat(m); });
     } catch (e) {
       // Say which image failed — with several selected, "it failed" is useless.
-      e.fileName = (file && file.name) || ('image ' + n);
-      e.message = String(e.message || e) + ' (' + e.fileName + ')';
+      // An account problem is not about this file, so do not label it with one.
+      if (e.code !== 'NO_CREDIT' && e.code !== 'RATE_LIMITED') {
+        e.fileName = (file && file.name) || ('image ' + n);
+        e.message = String(e.message || e) + ' (' + e.fileName + ')';
+      }
       throw e;
     }
     if (fields.summary) summaryParts.push(fields.summary);
@@ -2250,8 +2253,10 @@ async function runProfileExtraction(files, onProgress) {
       try {
         fields = await extractFromPanels(imgEl, panels, PROFILE_EXTRACT_PROMPT, 4000, mergeProfileResults, onProgress);
       } catch (e) {
-        e.fileName = (file && file.name) || ('image ' + fileNo);
-        e.message = String(e.message || e) + ' (' + e.fileName + ')';
+        if (e.code !== 'NO_CREDIT' && e.code !== 'RATE_LIMITED') {
+          e.fileName = (file && file.name) || ('image ' + fileNo);
+          e.message = String(e.message || e) + ' (' + e.fileName + ')';
+        }
         throw e;
       }
       if (!name && fields.name) name = String(fields.name).trim();
@@ -2285,6 +2290,8 @@ async function runProfileExtraction(files, onProgress) {
 }
 
 function friendlyExtractError(e) {
+  if (e && e.code === 'NO_CREDIT') return e.message;
+  if (e && e.code === 'RATE_LIMITED') return e.message;
   if (e && e.code === 'NO_API_KEY') return 'No Anthropic API key on this device. Add it in Settings — it is stored per device, so each browser needs it once.';
   if (e && e.code === 'BAD_API_KEY') return 'That API key was rejected — check it in Settings.';
   if (e && e.code === 'API_FAILED') return e.message;
@@ -2342,12 +2349,26 @@ async function callVision(contentBlocks, maxTokens, attempt) {
     throw err;
   }
   if (!response.ok) {
-    // Surface what the API actually said rather than a generic failure.
     let detail = '';
     try {
       const body = await response.json();
       detail = (body && body.error && (body.error.message || body.error.type)) || '';
     } catch (e) { /* non-JSON body */ }
+
+    // Some rejections are about the account, not the image. Naming them stops the
+    // app looking broken when nothing is wrong with it.
+    if (/credit balance|too low|billing|quota/i.test(detail)) {
+      const err = new Error('Your Anthropic API account is out of credit, so nothing can be read. '
+        + 'Top it up at console.anthropic.com under Plans & Billing. '
+        + 'This is separate from a Claude subscription.');
+      err.code = 'NO_CREDIT';
+      throw err;
+    }
+    if (response.status === 429) {
+      const err = new Error('The API is rate limiting requests. Wait a minute and try again.');
+      err.code = 'RATE_LIMITED';
+      throw err;
+    }
     throw wrapApiError('API returned ' + response.status + (detail ? ': ' + detail : ''));
   }
   const data = await response.json();
@@ -2481,7 +2502,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
         }
         return res;
       } catch (e) {
-        if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+        if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY' || e.code === 'NO_CREDIT') throw e;
         lastErr = e;
         if (e.partial) salvaged = e.partial;
         if (onProgress) onProgress(label + ' — retrying (' + (attempt + 2) + ' of ' + ATTEMPT_PLAN.length + ')…');
@@ -2497,7 +2518,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
     try {
       return await runChunkWithRetries(plans, 'Reading');
     } catch (err) {
-      if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY') throw err;
+      if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY' || err.code === 'NO_CREDIT') throw err;
       if (err.partial) return err.partial;
       if (total <= 2) throw err;
       if (onProgress) onProgress('First pass failed — rereading in sections…');
@@ -2526,7 +2547,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
         try {
           slots[i] = await runChunkWithRetries(chunks[i], label);
         } catch (e) {
-          if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+          if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY' || e.code === 'NO_CREDIT') throw e;
           lastError = e;
           chunks[i].forEach(p => failed.add(p.index));
         }
@@ -3026,7 +3047,7 @@ async function generateCoachSummary(person, onProgress) {
       result = await callVision([{ type: 'text', text: attempt.text }], attempt.tokens);
       break;
     } catch (e) {
-      if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+      if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY' || e.code === 'NO_CREDIT') throw e;
       lastErr = e;
       if (e.partial && e.partial.status && !salvage) salvage = e.partial;
       if (e.code !== 'TRUNCATED' && e.code !== 'BAD_JSON') throw e;
@@ -3697,12 +3718,19 @@ function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickMa
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '2.4.1';
+const APP_VERSION = '2.4.2';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '2.4.2', date: '2026-08-11', changes: [
+      ['changed', 'An out-of-credit API account is now named as such, instead of appearing as a failure to read the screenshot'],
+      ['changed', 'Billing rejections are not retried, and are not labelled with a filename — they are not about the image'],
+      ['added', 'Rate limiting is recognised and reported separately'],
+    ],
+  },
   {
     version: '2.4.1', date: '2026-08-11', changes: [
       ['fixed', 'Every date shift was landing a day early: local midnight was being converted to UTC, which is the day before in Irish summer time'],
@@ -10328,8 +10356,11 @@ async function extractChatPayload(files, onProgress) {
       });
     } catch (e) {
       // Say which image failed — with several selected, "it failed" is useless.
-      e.fileName = file && file.name || 'image ' + n;
-      e.message = String(e.message || e) + ' (' + e.fileName + ')';
+      // An account problem is not about this file, so do not label it with one.
+      if (e.code !== 'NO_CREDIT' && e.code !== 'RATE_LIMITED') {
+        e.fileName = file && file.name || 'image ' + n;
+        e.message = String(e.message || e) + ' (' + e.fileName + ')';
+      }
       throw e;
     }
     if (fields.summary) summaryParts.push(fields.summary);
@@ -10681,8 +10712,10 @@ async function runProfileExtraction(files, onProgress) {
       try {
         fields = await extractFromPanels(imgEl, panels, PROFILE_EXTRACT_PROMPT, 4000, mergeProfileResults, onProgress);
       } catch (e) {
-        e.fileName = file && file.name || 'image ' + fileNo;
-        e.message = String(e.message || e) + ' (' + e.fileName + ')';
+        if (e.code !== 'NO_CREDIT' && e.code !== 'RATE_LIMITED') {
+          e.fileName = file && file.name || 'image ' + fileNo;
+          e.message = String(e.message || e) + ' (' + e.fileName + ')';
+        }
         throw e;
       }
       if (!name && fields.name) name = String(fields.name).trim();
@@ -10724,6 +10757,8 @@ async function runProfileExtraction(files, onProgress) {
   };
 }
 function friendlyExtractError(e) {
+  if (e && e.code === 'NO_CREDIT') return e.message;
+  if (e && e.code === 'RATE_LIMITED') return e.message;
   if (e && e.code === 'NO_API_KEY') return 'No Anthropic API key on this device. Add it in Settings — it is stored per device, so each browser needs it once.';
   if (e && e.code === 'BAD_API_KEY') return 'That API key was rejected — check it in Settings.';
   if (e && e.code === 'API_FAILED') return e.message;
@@ -10779,12 +10814,24 @@ async function callVision(contentBlocks, maxTokens, attempt) {
     throw err;
   }
   if (!response.ok) {
-    // Surface what the API actually said rather than a generic failure.
     let detail = '';
     try {
       const body = await response.json();
       detail = body && body.error && (body.error.message || body.error.type) || '';
     } catch (e) {/* non-JSON body */}
+
+    // Some rejections are about the account, not the image. Naming them stops the
+    // app looking broken when nothing is wrong with it.
+    if (/credit balance|too low|billing|quota/i.test(detail)) {
+      const err = new Error('Your Anthropic API account is out of credit, so nothing can be read. ' + 'Top it up at console.anthropic.com under Plans & Billing. ' + 'This is separate from a Claude subscription.');
+      err.code = 'NO_CREDIT';
+      throw err;
+    }
+    if (response.status === 429) {
+      const err = new Error('The API is rate limiting requests. Wait a minute and try again.');
+      err.code = 'RATE_LIMITED';
+      throw err;
+    }
     throw wrapApiError('API returned ' + response.status + (detail ? ': ' + detail : ''));
   }
   const data = await response.json();
@@ -10933,7 +10980,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
         }
         return res;
       } catch (e) {
-        if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+        if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY' || e.code === 'NO_CREDIT') throw e;
         lastErr = e;
         if (e.partial) salvaged = e.partial;
         if (onProgress) onProgress(label + ' — retrying (' + (attempt + 2) + ' of ' + ATTEMPT_PLAN.length + ')…');
@@ -10948,7 +10995,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
     try {
       return await runChunkWithRetries(plans, 'Reading');
     } catch (err) {
-      if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY') throw err;
+      if (err.code === 'NO_API_KEY' || err.code === 'BAD_API_KEY' || err.code === 'NO_CREDIT') throw err;
       if (err.partial) return err.partial;
       if (total <= 2) throw err;
       if (onProgress) onProgress('First pass failed — rereading in sections…');
@@ -10975,7 +11022,7 @@ async function extractFromPanels(imgEl, plans, prompt, maxTokens, merge, onProgr
         try {
           slots[i] = await runChunkWithRetries(chunks[i], label);
         } catch (e) {
-          if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+          if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY' || e.code === 'NO_CREDIT') throw e;
           lastError = e;
           chunks[i].forEach(p => failed.add(p.index));
         }
@@ -11457,7 +11504,7 @@ async function generateCoachSummary(person, onProgress) {
       }], attempt.tokens);
       break;
     } catch (e) {
-      if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY') throw e;
+      if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY' || e.code === 'NO_CREDIT') throw e;
       lastErr = e;
       if (e.partial && e.partial.status && !salvage) salvage = e.partial;
       if (e.code !== 'TRUNCATED' && e.code !== 'BAD_JSON') throw e;
@@ -12188,12 +12235,16 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '2.4.1';
+const APP_VERSION = '2.4.2';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '2.4.2',
+  date: '2026-08-11',
+  changes: [['changed', 'An out-of-credit API account is now named as such, instead of appearing as a failure to read the screenshot'], ['changed', 'Billing rejections are not retried, and are not labelled with a filename — they are not about the image'], ['added', 'Rate limiting is recognised and reported separately']]
+}, {
   version: '2.4.1',
   date: '2026-08-11',
   changes: [['fixed', 'Every date shift was landing a day early: local midnight was being converted to UTC, which is the day before in Irish summer time'], ['changed', 'The date question now asks about the words on screen — "The chat says Yesterday. What date was that?" — and works the capture date out itself'], ['added', 'The dialog shows what every other divider becomes, and states the screenshot date it has settled on']]
