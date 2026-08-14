@@ -1442,6 +1442,11 @@ function relSpanMonths(person) {
 }
 
 // A judgement, not a rule — he can override it in the person form.
+// Completed dates only. Upcoming, proposed, cancelled and no-shows are not dates.
+function completedDateCount(person) {
+  return (person.dates || []).filter(d => d && d.status === 'Completed').length;
+}
+
 function classifyRelationship(person) {
   if (person.relType) return person.relType;
   if (person.stage === 'Friend-zoned') return 'Friend-zoned';
@@ -1463,10 +1468,11 @@ function classifyRelationship(person) {
   if (!met) return 'Talking only';
   if (months >= 12) return 'Long-term relationship';
   if (months >= 6) return 'Relationship';
-  if (met === 1) return 'One date';
   if (months >= 3 && met >= 4) return 'Situationship';
-  if (met <= 4) return 'Few dates';
-  return 'Short-lived';
+  // Below that, the count says more than a label does.
+  if (met === 1) return 'One date';
+  if (met <= 6) return met + ' dates';
+  return met + ' dates, short-lived';
 }
 
 // Closed, and how long ago — a thing that ended last month reads differently
@@ -3926,12 +3932,21 @@ function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickMa
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '3.0.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '3.0.0', date: '2026-08-14', changes: [
+      ['added', 'Ask the coaches: a running conversation about each person, grounded in her whole record and the current read'],
+      ['added', 'The read shows what each selected coach would do, before the combined next move'],
+      ['changed', 'The read is deliberately shorter — three paragraphs at most, under 180 words'],
+      ['changed', 'The next move weighs the coaches against what you said you want, and names which view it followed'],
+      ['changed', 'The profile header counts completed dates instead of labelling them "few"'],
+    ],
+  },
   {
     version: '2.8.0', date: '2026-08-14', changes: [
       ['added', 'Ask the coaches: a running conversation about each person, grounded in her whole record and the current read'],
@@ -5581,6 +5596,16 @@ function RelationshipTracker() {
                         <span className="text-[10px] uppercase tracking-wide bg-stone-100 text-stone-700 rounded-full px-2 py-0.5">
                           {classifyRelationship(selected)}
                         </span>
+                        {(() => {
+                          const met = completedDateCount(selected);
+                          return (
+                            <span className={`text-[10px] uppercase tracking-wide rounded-full px-2 py-0.5 ${
+                              met ? 'bg-emerald-50 text-emerald-800' : 'bg-stone-100 text-stone-500'
+                            }`}>
+                              {met ? met + (met === 1 ? ' date' : ' dates') : 'No dates yet'}
+                            </span>
+                          );
+                        })()}
                         {closure.closed && (
                           <span className="text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5">
                             {closure.label}
@@ -6124,7 +6149,9 @@ function RelationshipTracker() {
                       {p.dateMet && <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" />Matched {p.dateMet}</span>}
                     </div>
                     <div className="mt-1 flex items-center gap-3 text-sm">
-                      <span className="text-stone-500">{completedCount} date{completedCount === 1 ? '' : 's'}</span>
+                      <span className="text-stone-500">
+                        {completedCount ? completedCount + (completedCount === 1 ? ' date' : ' dates') : 'No dates yet'}
+                      </span>
                       {activityRank(p) && <span className="text-stone-400">Active {friendlyDay(activityRank(p)).toLowerCase()}</span>}
                       {avg !== null && (
                         <span className="flex items-center gap-1 font-semibold text-amber-600">
@@ -10414,6 +10441,10 @@ function relSpanMonths(person) {
 }
 
 // A judgement, not a rule — he can override it in the person form.
+// Completed dates only. Upcoming, proposed, cancelled and no-shows are not dates.
+function completedDateCount(person) {
+  return (person.dates || []).filter(d => d && d.status === 'Completed').length;
+}
 function classifyRelationship(person) {
   if (person.relType) return person.relType;
   if (person.stage === 'Friend-zoned') return 'Friend-zoned';
@@ -10433,10 +10464,11 @@ function classifyRelationship(person) {
   if (!met) return 'Talking only';
   if (months >= 12) return 'Long-term relationship';
   if (months >= 6) return 'Relationship';
-  if (met === 1) return 'One date';
   if (months >= 3 && met >= 4) return 'Situationship';
-  if (met <= 4) return 'Few dates';
-  return 'Short-lived';
+  // Below that, the count says more than a label does.
+  if (met === 1) return 'One date';
+  if (met <= 6) return met + ' dates';
+  return met + ' dates, short-lived';
 }
 
 // Closed, and how long ago — a thing that ended last month reads differently
@@ -13067,12 +13099,16 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '3.0.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '3.0.0',
+  date: '2026-08-14',
+  changes: [['added', 'Ask the coaches: a running conversation about each person, grounded in her whole record and the current read'], ['added', 'The read shows what each selected coach would do, before the combined next move'], ['changed', 'The read is deliberately shorter — three paragraphs at most, under 180 words'], ['changed', 'The next move weighs the coaches against what you said you want, and names which view it followed'], ['changed', 'The profile header counts completed dates instead of labelling them "few"']]
+}, {
   version: '2.8.0',
   date: '2026-08-14',
   changes: [['added', 'Ask the coaches: a running conversation about each person, grounded in her whole record and the current read'], ['added', 'The read now shows what each selected coach would do, before the combined next move'], ['changed', 'The read is deliberately shorter — three paragraphs at most, under 180 words'], ['changed', 'The next move weighs the coaches against what you said you want, and names which view it followed']]
@@ -14706,7 +14742,12 @@ function RelationshipTracker() {
         className: "text-stone-500"
       }, "· ", formatSpanDetailed(selected)), /*#__PURE__*/React.createElement("span", {
         className: "text-[10px] uppercase tracking-wide bg-stone-100 text-stone-700 rounded-full px-2 py-0.5"
-      }, classifyRelationship(selected)), closure.closed && /*#__PURE__*/React.createElement("span", {
+      }, classifyRelationship(selected)), (() => {
+        const met = completedDateCount(selected);
+        return /*#__PURE__*/React.createElement("span", {
+          className: `text-[10px] uppercase tracking-wide rounded-full px-2 py-0.5 ${met ? 'bg-emerald-50 text-emerald-800' : 'bg-stone-100 text-stone-500'}`
+        }, met ? met + (met === 1 ? ' date' : ' dates') : 'No dates yet');
+      })(), closure.closed && /*#__PURE__*/React.createElement("span", {
         className: "text-[10px] uppercase tracking-wide bg-stone-900 text-white rounded-full px-2 py-0.5"
       }, closure.label));
     })(), selected.meetingChannel && /*#__PURE__*/React.createElement("div", {
@@ -15222,7 +15263,7 @@ function RelationshipTracker() {
       className: "mt-1 flex items-center gap-3 text-sm"
     }, /*#__PURE__*/React.createElement("span", {
       className: "text-stone-500"
-    }, completedCount, " date", completedCount === 1 ? '' : 's'), activityRank(p) && /*#__PURE__*/React.createElement("span", {
+    }, completedCount ? completedCount + (completedCount === 1 ? ' date' : ' dates') : 'No dates yet'), activityRank(p) && /*#__PURE__*/React.createElement("span", {
       className: "text-stone-400"
     }, "Active ", friendlyDay(activityRank(p)).toLowerCase()), avg !== null && /*#__PURE__*/React.createElement("span", {
       className: "flex items-center gap-1 font-semibold text-amber-600"
