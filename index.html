@@ -411,6 +411,8 @@ const { useState, useEffect, useMemo } = React;
 const STAGES = ['Talking Stage', 'Dating', 'Relationship', 'Friend-zoned', 'Ended'];
 const DATE_STATUSES = ['Upcoming', 'Completed', 'Proposed', 'Cancelled', 'No show'];
 const END_REASONS = ['Ghosted', 'They ended it', 'I ended it', 'Mutual', 'Moved away', 'Other'];
+// Stored as the party, so it reads correctly wherever it is shown.
+const CANCELLED_BY = ['She did', 'I did', 'Both / circumstances', 'Unspecified'];
 const COMMON_CHANNELS = ['Hinge', 'Tinder', 'Bumble', 'In person', 'Through friends', 'Work', 'Other'];
 
 const emptyPersonForm = {
@@ -436,7 +438,7 @@ function newPersonRecord(overrides = {}) {
 const emptyDateForm = {
   location: '', date: '', time: '', status: 'Upcoming', venues: '',
   chemistry: 0, connection: 0, compatibility: 0, intimacy: 0, outcome: '', notes: '',
-  outfit: emptyOutfit(),
+  cancelledBy: '', outfit: emptyOutfit(),
 };
 
 // ---------- (No seed/example data — a brand-new install starts empty.) ----------
@@ -1136,6 +1138,31 @@ function interestGap(person) {
   const hers = person.coachRead && person.coachRead.interestLevel;
   if (typeof mine !== 'number' || typeof hers !== 'number') return null;
   return { mine, hers, gap: mine - hers };
+}
+
+// What a date's status means right now, rather than what was typed when it was
+// created. An Upcoming date whose day has arrived should say so.
+function liveDateState(d) {
+  if (!d) return { key: 'unknown', label: '—', tone: 'bg-stone-100 text-stone-600' };
+  if (d.status === 'Cancelled') {
+    const by = { 'She did': ' by her', 'I did': ' by me', 'Both / circumstances': ' — circumstances' }[d.cancelledBy] || '';
+    return { key: 'cancelled', label: 'Cancelled' + by, tone: 'bg-stone-200 text-stone-600' };
+  }
+  if (d.status === 'No show') return { key: 'noshow', label: 'No show', tone: 'bg-red-50 text-red-700' };
+  if (d.status === 'Proposed') return { key: 'proposed', label: 'Never happened', tone: 'bg-stone-100 text-stone-500' };
+  if (d.status === 'Completed') return { key: 'completed', label: '', tone: '' };
+  // Upcoming: is it today, still ahead, or has the day passed?
+  if (!d.date) return { key: 'upcoming', label: 'Upcoming', tone: 'bg-sky-50 text-sky-800' };
+  if (d.date === TODAY()) return { key: 'today', label: 'Today', tone: 'bg-emerald-600 text-white' };
+  if (d.date > TODAY()) {
+    const days = daysBetween(TODAY(), d.date);
+    return {
+      key: 'upcoming',
+      label: days === 1 ? 'Tomorrow' : 'Upcoming · in ' + formatGap(days),
+      tone: 'bg-sky-50 text-sky-800',
+    };
+  }
+  return { key: 'awaiting', label: 'Did this happen?', tone: 'bg-amber-50 text-amber-800' };
 }
 
 // ---------- What you wore ----------
@@ -3081,7 +3108,8 @@ function buildCoachContext(person, brief) {
         const avg = overallAvg(d);
         const kind = d.status === 'Completed' ? 'MET IN PERSON'
           : d.status === 'Proposed' ? 'MEETING SUGGESTED BUT NEVER HAPPENED'
-          : d.status === 'Cancelled' ? 'DATE ARRANGED THEN CANCELLED'
+          : d.status === 'Cancelled' ? ('DATE ARRANGED THEN CANCELLED'
+              + ({ 'She did': ' BY HER', 'I did': ' BY HIM', 'Both / circumstances': ' by circumstances' }[d.cancelledBy] || ''))
           : d.status === 'No show' ? 'DATE ARRANGED, SHE DID NOT SHOW'
           : 'DATE BOOKED, NOT YET HAPPENED';
         lines.push('  ' + d.date + ' ' + kind + ' — ' + (d.location || 'venue not recorded')
@@ -3875,12 +3903,20 @@ function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickMa
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '2.6.0';
+const APP_VERSION = '2.7.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '2.7.0', date: '2026-08-13', changes: [
+      ['changed', 'Date history moved up the page, directly under the read'],
+      ['changed', 'A date shows where it actually stands: Today, Tomorrow, Upcoming in 5 days, or Did this happen?'],
+      ['added', 'Cancelled dates record who cancelled, and the coach weighs it'],
+      ['changed', 'Ratings and intimacy appear on the form as soon as a date is marked Completed, rather than needing a second visit'],
+    ],
+  },
   {
     version: '2.6.0', date: '2026-08-13', changes: [
       ['added', 'Record what you wore on a date or encounter: top, bottom, shoes, outerwear'],
@@ -5406,6 +5442,88 @@ function RelationshipTracker() {
             myRead={selected.myRead}
           />
 
+          {(selected.dateSuggestions || []).length > 0 && (
+            <DateSuggestions
+              suggestions={selected.dateSuggestions}
+              onAccept={acceptDateSuggestion}
+              onDismiss={dismissDateSuggestion}
+            />
+          )}
+
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-stone-700">Date history</h3>
+            <button onClick={startAddDate} className="flex items-center gap-1.5 bg-stone-900 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-stone-800">
+              <Plus className="w-3.5 h-3.5" /> Add date
+            </button>
+          </div>
+
+          {sortedDates.length === 0 && (
+            <p className="text-sm text-stone-500 py-6 text-center">No dates logged yet — still talking stage.</p>
+          )}
+
+          <div className="space-y-3">
+            {sortedDates.map(d => {
+              const isCancelled = d.status === 'Cancelled';
+              const isNoShow = d.status === 'No show';
+              const isUpcoming = d.status === 'Upcoming';
+              const live = liveDateState(d);
+              const badgeLabel = live.label || (labels[d.id] || '—');
+              const avgD = overallAvg(d);
+              return (
+                <div key={d.id} className={`bg-white border border-stone-200 rounded-lg p-4 ${isCancelled || isNoShow ? 'opacity-70' : ''}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`flex items-center gap-1 text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${
+                          live.tone || 'bg-stone-100 text-stone-600'
+                        }`}>
+                          {isCancelled && <Ban className="w-2.5 h-2.5" />}
+                          {isNoShow && <UserX className="w-2.5 h-2.5" />}
+                          {badgeLabel}
+                        </span>
+                        {live.key === 'completed' && labels[d.id] && (
+                          <span className="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">
+                            {labels[d.id]}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 flex items-center gap-1 text-sm text-stone-600">
+                        <MapPin className="w-3.5 h-3.5 shrink-0" /><span>{d.location}</span>
+                      </div>
+                      {d.date && (
+                        <div className="mt-0.5 flex items-center gap-1 text-sm text-stone-600">
+                          <Calendar className="w-3.5 h-3.5 shrink-0" /><span>{d.date}</span>
+                        </div>
+                      )}
+                      {d.venues && <p className="mt-2 text-sm text-stone-800">{d.venues}</p>}
+                      {d.notes && <p className="mt-1 text-sm text-stone-500">{d.notes}</p>}
+                      {avgD !== null && (
+                        <div className="mt-2 flex items-center gap-1.5 text-sm font-semibold text-amber-600">
+                          <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" /> {avgD.toFixed(1)}
+                        </div>
+                      )}
+                      {d.outcome && <p className="mt-1 text-xs text-stone-600">{d.outcome}</p>}
+                    </div>
+                    <div className="flex flex-col gap-1 shrink-0">
+                      <button onClick={() => startEditDate(d)} className="p-1.5 text-stone-500 hover:text-stone-900 rounded focus:outline-none focus:ring-2 focus:ring-stone-900">
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                      <button onClick={() => askConfirm({
+                        title: 'Delete this date?',
+                        body: (d.date ? formatDayLabel(d.date) : 'This date') + (d.location ? ' at ' + d.location : '') + ' will be removed.',
+                        detail: (d.notes || '').trim() ? 'Your write-up of it goes too, and nothing else records what happened.' : 'There is no undo.',
+                        confirmLabel: 'Delete date',
+                        run: () => removeDate(d.id),
+                      })} className="p-1.5 text-stone-500 hover:text-red-700 rounded focus:outline-none focus:ring-2 focus:ring-stone-900">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
           <MyReadCard
             myRead={selected.myRead}
             coachRead={selected.coachRead}
@@ -5479,84 +5597,6 @@ function RelationshipTracker() {
             onSummarise={rebuildDaySummaries}
           />
 
-          {(selected.dateSuggestions || []).length > 0 && (
-            <DateSuggestions
-              suggestions={selected.dateSuggestions}
-              onAccept={acceptDateSuggestion}
-              onDismiss={dismissDateSuggestion}
-            />
-          )}
-
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-stone-700">Date history</h3>
-            <button onClick={startAddDate} className="flex items-center gap-1.5 bg-stone-900 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-stone-800">
-              <Plus className="w-3.5 h-3.5" /> Add date
-            </button>
-          </div>
-
-          {sortedDates.length === 0 && (
-            <p className="text-sm text-stone-500 py-6 text-center">No dates logged yet — still talking stage.</p>
-          )}
-
-          <div className="space-y-3">
-            {sortedDates.map(d => {
-              const isCancelled = d.status === 'Cancelled';
-              const isNoShow = d.status === 'No show';
-              const isUpcoming = d.status === 'Upcoming';
-              const badgeLabel = isCancelled ? 'Cancelled' : isNoShow ? 'No show' : (labels[d.id] || '—');
-              const avgD = overallAvg(d);
-              return (
-                <div key={d.id} className={`bg-white border border-stone-200 rounded-lg p-4 ${isCancelled || isNoShow ? 'opacity-70' : ''}`}>
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`flex items-center gap-1 text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${
-                          isCancelled ? 'bg-red-50 text-red-800' :
-                          isNoShow ? 'bg-amber-50 text-amber-800' :
-                          isUpcoming ? 'bg-emerald-50 text-emerald-800' :
-                          'bg-stone-100 text-stone-600'
-                        }`}>
-                          {isCancelled && <Ban className="w-2.5 h-2.5" />}
-                          {isNoShow && <UserX className="w-2.5 h-2.5" />}
-                          {badgeLabel}
-                        </span>
-                      </div>
-                      <div className="mt-1 flex items-center gap-1 text-sm text-stone-600">
-                        <MapPin className="w-3.5 h-3.5 shrink-0" /><span>{d.location}</span>
-                      </div>
-                      {d.date && (
-                        <div className="mt-0.5 flex items-center gap-1 text-sm text-stone-600">
-                          <Calendar className="w-3.5 h-3.5 shrink-0" /><span>{d.date}</span>
-                        </div>
-                      )}
-                      {d.venues && <p className="mt-2 text-sm text-stone-800">{d.venues}</p>}
-                      {d.notes && <p className="mt-1 text-sm text-stone-500">{d.notes}</p>}
-                      {avgD !== null && (
-                        <div className="mt-2 flex items-center gap-1.5 text-sm font-semibold text-amber-600">
-                          <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" /> {avgD.toFixed(1)}
-                        </div>
-                      )}
-                      {d.outcome && <p className="mt-1 text-xs text-stone-600">{d.outcome}</p>}
-                    </div>
-                    <div className="flex flex-col gap-1 shrink-0">
-                      <button onClick={() => startEditDate(d)} className="p-1.5 text-stone-500 hover:text-stone-900 rounded focus:outline-none focus:ring-2 focus:ring-stone-900">
-                        <Pencil className="w-4 h-4" />
-                      </button>
-                      <button onClick={() => askConfirm({
-                        title: 'Delete this date?',
-                        body: (d.date ? formatDayLabel(d.date) : 'This date') + (d.location ? ' at ' + d.location : '') + ' will be removed.',
-                        detail: (d.notes || '').trim() ? 'Your write-up of it goes too, and nothing else records what happened.' : 'There is no undo.',
-                        confirmLabel: 'Delete date',
-                        run: () => removeDate(d.id),
-                      })} className="p-1.5 text-stone-500 hover:text-red-700 rounded focus:outline-none focus:ring-2 focus:ring-stone-900">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
         </div>
 
         {contactNote && (
@@ -6174,15 +6214,23 @@ function DateFormModal({ form, setForm, isNew, onCancel, onSave, onAddToCalendar
           onFocus={focusScroll} style={fieldScrollMargin} placeholder="e.g. Coffee spot → Bar"
           className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900" />
       </Field>
-      <Field label="Chemistry"><StarPicker value={form.chemistry} onChange={v => setForm(f => ({ ...f, chemistry: v }))} /></Field>
-      <Field label="Connection"><StarPicker value={form.connection} onChange={v => setForm(f => ({ ...f, connection: v }))} /></Field>
-      <Field label="Compatibility"><StarPicker value={form.compatibility} onChange={v => setForm(f => ({ ...f, compatibility: v }))} /></Field>
-      {avg !== null && (
-        <div className="flex items-center gap-1.5 -mt-1">
-          <span className="text-xs font-medium text-stone-500">Overall (auto):</span>
-          <span className="flex items-center gap-1 text-sm font-semibold text-amber-600">
-            <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" />{avg.toFixed(1)}
-          </span>
+      {/* Only worth asking once the date has actually happened. */}
+      {form.status === 'Completed' && (
+        <div className="border border-stone-200 rounded-md p-2.5 space-y-2">
+          <div className="text-xs font-medium text-stone-600">How was it?</div>
+          <Field label="Chemistry"><StarPicker value={form.chemistry} onChange={v => setForm(f => ({ ...f, chemistry: v }))} /></Field>
+          <Field label="Connection"><StarPicker value={form.connection} onChange={v => setForm(f => ({ ...f, connection: v }))} /></Field>
+          <Field label="Compatibility"><StarPicker value={form.compatibility} onChange={v => setForm(f => ({ ...f, compatibility: v }))} /></Field>
+          {avg !== null && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-medium text-stone-500">Overall (auto):</span>
+              <span className="flex items-center gap-1 text-sm font-semibold text-amber-600">
+                <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" />{avg.toFixed(1)}
+              </span>
+            </div>
+          )}
+          <Hearts label="Intimacy" hint="Optional — leave blank if it does not apply"
+            value={form.intimacy || 0} onChange={v => setForm(f => ({ ...f, intimacy: v }))} />
         </div>
       )}
       <Field label="Outcome">
@@ -6206,6 +6254,16 @@ function DateFormModal({ form, setForm, isNew, onCancel, onSave, onAddToCalendar
             </button>
           </div>
         </div>
+      )}
+
+      {form.status === 'Cancelled' && (
+        <Field label="Who cancelled?" hint="It matters — two cancellations from her side is an answer in itself">
+          <select value={form.cancelledBy || ''} onChange={e => setForm(f => ({ ...f, cancelledBy: e.target.value }))}
+            className="w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900">
+            <option value="">Not recorded</option>
+            {CANCELLED_BY.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
       )}
 
       {form.status !== 'Proposed' && (
@@ -8771,6 +8829,8 @@ const {
 const STAGES = ['Talking Stage', 'Dating', 'Relationship', 'Friend-zoned', 'Ended'];
 const DATE_STATUSES = ['Upcoming', 'Completed', 'Proposed', 'Cancelled', 'No show'];
 const END_REASONS = ['Ghosted', 'They ended it', 'I ended it', 'Mutual', 'Moved away', 'Other'];
+// Stored as the party, so it reads correctly wherever it is shown.
+const CANCELLED_BY = ['She did', 'I did', 'Both / circumstances', 'Unspecified'];
 const COMMON_CHANNELS = ['Hinge', 'Tinder', 'Bumble', 'In person', 'Through friends', 'Work', 'Other'];
 const emptyPersonForm = {
   name: '',
@@ -8827,6 +8887,7 @@ const emptyDateForm = {
   intimacy: 0,
   outcome: '',
   notes: '',
+  cancelledBy: '',
   outfit: emptyOutfit()
 };
 
@@ -9701,6 +9762,67 @@ function interestGap(person) {
     mine,
     hers,
     gap: mine - hers
+  };
+}
+
+// What a date's status means right now, rather than what was typed when it was
+// created. An Upcoming date whose day has arrived should say so.
+function liveDateState(d) {
+  if (!d) return {
+    key: 'unknown',
+    label: '—',
+    tone: 'bg-stone-100 text-stone-600'
+  };
+  if (d.status === 'Cancelled') {
+    const by = {
+      'She did': ' by her',
+      'I did': ' by me',
+      'Both / circumstances': ' — circumstances'
+    }[d.cancelledBy] || '';
+    return {
+      key: 'cancelled',
+      label: 'Cancelled' + by,
+      tone: 'bg-stone-200 text-stone-600'
+    };
+  }
+  if (d.status === 'No show') return {
+    key: 'noshow',
+    label: 'No show',
+    tone: 'bg-red-50 text-red-700'
+  };
+  if (d.status === 'Proposed') return {
+    key: 'proposed',
+    label: 'Never happened',
+    tone: 'bg-stone-100 text-stone-500'
+  };
+  if (d.status === 'Completed') return {
+    key: 'completed',
+    label: '',
+    tone: ''
+  };
+  // Upcoming: is it today, still ahead, or has the day passed?
+  if (!d.date) return {
+    key: 'upcoming',
+    label: 'Upcoming',
+    tone: 'bg-sky-50 text-sky-800'
+  };
+  if (d.date === TODAY()) return {
+    key: 'today',
+    label: 'Today',
+    tone: 'bg-emerald-600 text-white'
+  };
+  if (d.date > TODAY()) {
+    const days = daysBetween(TODAY(), d.date);
+    return {
+      key: 'upcoming',
+      label: days === 1 ? 'Tomorrow' : 'Upcoming · in ' + formatGap(days),
+      tone: 'bg-sky-50 text-sky-800'
+    };
+  }
+  return {
+    key: 'awaiting',
+    label: 'Did this happen?',
+    tone: 'bg-amber-50 text-amber-800'
   };
 }
 
@@ -11830,7 +11952,11 @@ function buildCoachContext(person, brief) {
       } else {
         const d = item.entry;
         const avg = overallAvg(d);
-        const kind = d.status === 'Completed' ? 'MET IN PERSON' : d.status === 'Proposed' ? 'MEETING SUGGESTED BUT NEVER HAPPENED' : d.status === 'Cancelled' ? 'DATE ARRANGED THEN CANCELLED' : d.status === 'No show' ? 'DATE ARRANGED, SHE DID NOT SHOW' : 'DATE BOOKED, NOT YET HAPPENED';
+        const kind = d.status === 'Completed' ? 'MET IN PERSON' : d.status === 'Proposed' ? 'MEETING SUGGESTED BUT NEVER HAPPENED' : d.status === 'Cancelled' ? 'DATE ARRANGED THEN CANCELLED' + ({
+          'She did': ' BY HER',
+          'I did': ' BY HIM',
+          'Both / circumstances': ' by circumstances'
+        }[d.cancelledBy] || '') : d.status === 'No show' ? 'DATE ARRANGED, SHE DID NOT SHOW' : 'DATE BOOKED, NOT YET HAPPENED';
         lines.push('  ' + d.date + ' ' + kind + ' — ' + (d.location || 'venue not recorded') + (avg !== null ? ' — rated ' + avg.toFixed(1) + '/5 (chemistry ' + (d.chemistry || '–') + ', connection ' + (d.connection || '–') + ', compatibility ' + (d.compatibility || '–') + ')' : '') + (d.outcome ? ' — outcome: ' + d.outcome : ''));
         if (d.intimacy) {
           lines.push('      Physical progression on this date: ' + d.intimacy + '/5 (' + intimacyLabel(d.intimacy) + ').');
@@ -12658,12 +12784,16 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '2.6.0';
+const APP_VERSION = '2.7.0';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '2.7.0',
+  date: '2026-08-13',
+  changes: [['changed', 'Date history moved up the page, directly under the read'], ['changed', 'A date shows where it actually stands: Today, Tomorrow, Upcoming in 5 days, or Did this happen?'], ['added', 'Cancelled dates record who cancelled, and the coach weighs it'], ['changed', 'Ratings and intimacy appear on the form as soon as a date is marked Completed, rather than needing a second visit']]
+}, {
   version: '2.6.0',
   date: '2026-08-13',
   changes: [['added', 'Record what you wore on a date or encounter: top, bottom, shoes, outerwear'], ['added', 'Each item is remembered and offered next time, filtered as you type, with how long ago you last wore it'], ['added', 'Insights shows your most-worn items and how those dates were rated']]
@@ -14174,7 +14304,85 @@ function RelationshipTracker() {
       onRefresh: refreshCoachRead,
       onOpenSettings: () => setShowSettings(true),
       myRead: selected.myRead
-    }), /*#__PURE__*/React.createElement(MyReadCard, {
+    }), (selected.dateSuggestions || []).length > 0 && /*#__PURE__*/React.createElement(DateSuggestions, {
+      suggestions: selected.dateSuggestions,
+      onAccept: acceptDateSuggestion,
+      onDismiss: dismissDateSuggestion
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "flex items-center justify-between mb-3"
+    }, /*#__PURE__*/React.createElement("h3", {
+      className: "text-sm font-semibold text-stone-700"
+    }, "Date history"), /*#__PURE__*/React.createElement("button", {
+      onClick: startAddDate,
+      className: "flex items-center gap-1.5 bg-stone-900 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-stone-800"
+    }, /*#__PURE__*/React.createElement(Plus, {
+      className: "w-3.5 h-3.5"
+    }), " Add date")), sortedDates.length === 0 && /*#__PURE__*/React.createElement("p", {
+      className: "text-sm text-stone-500 py-6 text-center"
+    }, "No dates logged yet — still talking stage."), /*#__PURE__*/React.createElement("div", {
+      className: "space-y-3"
+    }, sortedDates.map(d => {
+      const isCancelled = d.status === 'Cancelled';
+      const isNoShow = d.status === 'No show';
+      const isUpcoming = d.status === 'Upcoming';
+      const live = liveDateState(d);
+      const badgeLabel = live.label || labels[d.id] || '—';
+      const avgD = overallAvg(d);
+      return /*#__PURE__*/React.createElement("div", {
+        key: d.id,
+        className: `bg-white border border-stone-200 rounded-lg p-4 ${isCancelled || isNoShow ? 'opacity-70' : ''}`
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "flex items-start justify-between gap-3"
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "min-w-0"
+      }, /*#__PURE__*/React.createElement("div", {
+        className: "flex items-center gap-2 flex-wrap"
+      }, /*#__PURE__*/React.createElement("span", {
+        className: `flex items-center gap-1 text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${live.tone || 'bg-stone-100 text-stone-600'}`
+      }, isCancelled && /*#__PURE__*/React.createElement(Ban, {
+        className: "w-2.5 h-2.5"
+      }), isNoShow && /*#__PURE__*/React.createElement(UserX, {
+        className: "w-2.5 h-2.5"
+      }), badgeLabel), live.key === 'completed' && labels[d.id] && /*#__PURE__*/React.createElement("span", {
+        className: "text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full bg-stone-100 text-stone-600"
+      }, labels[d.id])), /*#__PURE__*/React.createElement("div", {
+        className: "mt-1 flex items-center gap-1 text-sm text-stone-600"
+      }, /*#__PURE__*/React.createElement(MapPin, {
+        className: "w-3.5 h-3.5 shrink-0"
+      }), /*#__PURE__*/React.createElement("span", null, d.location)), d.date && /*#__PURE__*/React.createElement("div", {
+        className: "mt-0.5 flex items-center gap-1 text-sm text-stone-600"
+      }, /*#__PURE__*/React.createElement(Calendar, {
+        className: "w-3.5 h-3.5 shrink-0"
+      }), /*#__PURE__*/React.createElement("span", null, d.date)), d.venues && /*#__PURE__*/React.createElement("p", {
+        className: "mt-2 text-sm text-stone-800"
+      }, d.venues), d.notes && /*#__PURE__*/React.createElement("p", {
+        className: "mt-1 text-sm text-stone-500"
+      }, d.notes), avgD !== null && /*#__PURE__*/React.createElement("div", {
+        className: "mt-2 flex items-center gap-1.5 text-sm font-semibold text-amber-600"
+      }, /*#__PURE__*/React.createElement(Star, {
+        className: "w-3.5 h-3.5 fill-amber-500 text-amber-500"
+      }), " ", avgD.toFixed(1)), d.outcome && /*#__PURE__*/React.createElement("p", {
+        className: "mt-1 text-xs text-stone-600"
+      }, d.outcome)), /*#__PURE__*/React.createElement("div", {
+        className: "flex flex-col gap-1 shrink-0"
+      }, /*#__PURE__*/React.createElement("button", {
+        onClick: () => startEditDate(d),
+        className: "p-1.5 text-stone-500 hover:text-stone-900 rounded focus:outline-none focus:ring-2 focus:ring-stone-900"
+      }, /*#__PURE__*/React.createElement(Pencil, {
+        className: "w-4 h-4"
+      })), /*#__PURE__*/React.createElement("button", {
+        onClick: () => askConfirm({
+          title: 'Delete this date?',
+          body: (d.date ? formatDayLabel(d.date) : 'This date') + (d.location ? ' at ' + d.location : '') + ' will be removed.',
+          detail: (d.notes || '').trim() ? 'Your write-up of it goes too, and nothing else records what happened.' : 'There is no undo.',
+          confirmLabel: 'Delete date',
+          run: () => removeDate(d.id)
+        }),
+        className: "p-1.5 text-stone-500 hover:text-red-700 rounded focus:outline-none focus:ring-2 focus:ring-stone-900"
+      }, /*#__PURE__*/React.createElement(Trash2, {
+        className: "w-4 h-4"
+      })))));
+    })), /*#__PURE__*/React.createElement(MyReadCard, {
       myRead: selected.myRead,
       coachRead: selected.coachRead,
       onEdit: () => setShowMyRead(true)
@@ -14242,82 +14450,7 @@ function RelationshipTracker() {
       }, {}),
       needsSummary: daysNeedingSummary(selected).length,
       onSummarise: rebuildDaySummaries
-    }), (selected.dateSuggestions || []).length > 0 && /*#__PURE__*/React.createElement(DateSuggestions, {
-      suggestions: selected.dateSuggestions,
-      onAccept: acceptDateSuggestion,
-      onDismiss: dismissDateSuggestion
-    }), /*#__PURE__*/React.createElement("div", {
-      className: "flex items-center justify-between mb-3"
-    }, /*#__PURE__*/React.createElement("h3", {
-      className: "text-sm font-semibold text-stone-700"
-    }, "Date history"), /*#__PURE__*/React.createElement("button", {
-      onClick: startAddDate,
-      className: "flex items-center gap-1.5 bg-stone-900 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-stone-800"
-    }, /*#__PURE__*/React.createElement(Plus, {
-      className: "w-3.5 h-3.5"
-    }), " Add date")), sortedDates.length === 0 && /*#__PURE__*/React.createElement("p", {
-      className: "text-sm text-stone-500 py-6 text-center"
-    }, "No dates logged yet — still talking stage."), /*#__PURE__*/React.createElement("div", {
-      className: "space-y-3"
-    }, sortedDates.map(d => {
-      const isCancelled = d.status === 'Cancelled';
-      const isNoShow = d.status === 'No show';
-      const isUpcoming = d.status === 'Upcoming';
-      const badgeLabel = isCancelled ? 'Cancelled' : isNoShow ? 'No show' : labels[d.id] || '—';
-      const avgD = overallAvg(d);
-      return /*#__PURE__*/React.createElement("div", {
-        key: d.id,
-        className: `bg-white border border-stone-200 rounded-lg p-4 ${isCancelled || isNoShow ? 'opacity-70' : ''}`
-      }, /*#__PURE__*/React.createElement("div", {
-        className: "flex items-start justify-between gap-3"
-      }, /*#__PURE__*/React.createElement("div", {
-        className: "min-w-0"
-      }, /*#__PURE__*/React.createElement("div", {
-        className: "flex items-center gap-2 flex-wrap"
-      }, /*#__PURE__*/React.createElement("span", {
-        className: `flex items-center gap-1 text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${isCancelled ? 'bg-red-50 text-red-800' : isNoShow ? 'bg-amber-50 text-amber-800' : isUpcoming ? 'bg-emerald-50 text-emerald-800' : 'bg-stone-100 text-stone-600'}`
-      }, isCancelled && /*#__PURE__*/React.createElement(Ban, {
-        className: "w-2.5 h-2.5"
-      }), isNoShow && /*#__PURE__*/React.createElement(UserX, {
-        className: "w-2.5 h-2.5"
-      }), badgeLabel)), /*#__PURE__*/React.createElement("div", {
-        className: "mt-1 flex items-center gap-1 text-sm text-stone-600"
-      }, /*#__PURE__*/React.createElement(MapPin, {
-        className: "w-3.5 h-3.5 shrink-0"
-      }), /*#__PURE__*/React.createElement("span", null, d.location)), d.date && /*#__PURE__*/React.createElement("div", {
-        className: "mt-0.5 flex items-center gap-1 text-sm text-stone-600"
-      }, /*#__PURE__*/React.createElement(Calendar, {
-        className: "w-3.5 h-3.5 shrink-0"
-      }), /*#__PURE__*/React.createElement("span", null, d.date)), d.venues && /*#__PURE__*/React.createElement("p", {
-        className: "mt-2 text-sm text-stone-800"
-      }, d.venues), d.notes && /*#__PURE__*/React.createElement("p", {
-        className: "mt-1 text-sm text-stone-500"
-      }, d.notes), avgD !== null && /*#__PURE__*/React.createElement("div", {
-        className: "mt-2 flex items-center gap-1.5 text-sm font-semibold text-amber-600"
-      }, /*#__PURE__*/React.createElement(Star, {
-        className: "w-3.5 h-3.5 fill-amber-500 text-amber-500"
-      }), " ", avgD.toFixed(1)), d.outcome && /*#__PURE__*/React.createElement("p", {
-        className: "mt-1 text-xs text-stone-600"
-      }, d.outcome)), /*#__PURE__*/React.createElement("div", {
-        className: "flex flex-col gap-1 shrink-0"
-      }, /*#__PURE__*/React.createElement("button", {
-        onClick: () => startEditDate(d),
-        className: "p-1.5 text-stone-500 hover:text-stone-900 rounded focus:outline-none focus:ring-2 focus:ring-stone-900"
-      }, /*#__PURE__*/React.createElement(Pencil, {
-        className: "w-4 h-4"
-      })), /*#__PURE__*/React.createElement("button", {
-        onClick: () => askConfirm({
-          title: 'Delete this date?',
-          body: (d.date ? formatDayLabel(d.date) : 'This date') + (d.location ? ' at ' + d.location : '') + ' will be removed.',
-          detail: (d.notes || '').trim() ? 'Your write-up of it goes too, and nothing else records what happened.' : 'There is no undo.',
-          confirmLabel: 'Delete date',
-          run: () => removeDate(d.id)
-        }),
-        className: "p-1.5 text-stone-500 hover:text-red-700 rounded focus:outline-none focus:ring-2 focus:ring-stone-900"
-      }, /*#__PURE__*/React.createElement(Trash2, {
-        className: "w-4 h-4"
-      })))));
-    }))), contactNote && /*#__PURE__*/React.createElement(ContactNoteModal, {
+    })), contactNote && /*#__PURE__*/React.createElement(ContactNoteModal, {
       people: people,
       initial: contactNote,
       onCancel: () => setContactNote(null),
@@ -15063,7 +15196,11 @@ function DateFormModal({
     style: fieldScrollMargin,
     placeholder: "e.g. Coffee spot → Bar",
     className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
-  })), /*#__PURE__*/React.createElement(Field, {
+  })), form.status === 'Completed' && /*#__PURE__*/React.createElement("div", {
+    className: "border border-stone-200 rounded-md p-2.5 space-y-2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs font-medium text-stone-600"
+  }, "How was it?"), /*#__PURE__*/React.createElement(Field, {
     label: "Chemistry"
   }, /*#__PURE__*/React.createElement(StarPicker, {
     value: form.chemistry,
@@ -15088,14 +15225,22 @@ function DateFormModal({
       compatibility: v
     }))
   })), avg !== null && /*#__PURE__*/React.createElement("div", {
-    className: "flex items-center gap-1.5 -mt-1"
+    className: "flex items-center gap-1.5"
   }, /*#__PURE__*/React.createElement("span", {
     className: "text-xs font-medium text-stone-500"
   }, "Overall (auto):"), /*#__PURE__*/React.createElement("span", {
     className: "flex items-center gap-1 text-sm font-semibold text-amber-600"
   }, /*#__PURE__*/React.createElement(Star, {
     className: "w-3.5 h-3.5 fill-amber-500 text-amber-500"
-  }), avg.toFixed(1))), /*#__PURE__*/React.createElement(Field, {
+  }), avg.toFixed(1))), /*#__PURE__*/React.createElement(Hearts, {
+    label: "Intimacy",
+    hint: "Optional — leave blank if it does not apply",
+    value: form.intimacy || 0,
+    onChange: v => setForm(f => ({
+      ...f,
+      intimacy: v
+    }))
+  })), /*#__PURE__*/React.createElement(Field, {
     label: "Outcome"
   }, /*#__PURE__*/React.createElement("input", {
     value: form.outcome,
@@ -15125,7 +15270,22 @@ function DateFormModal({
     className: "flex-1 flex items-center justify-center gap-1.5 border border-stone-300 bg-white rounded-md py-1.5 text-sm font-medium hover:bg-stone-100"
   }, /*#__PURE__*/React.createElement(Download, {
     className: "w-3.5 h-3.5"
-  }), " .ics file"))), form.status !== 'Proposed' && /*#__PURE__*/React.createElement(OutfitFields, {
+  }), " .ics file"))), form.status === 'Cancelled' && /*#__PURE__*/React.createElement(Field, {
+    label: "Who cancelled?",
+    hint: "It matters — two cancellations from her side is an answer in itself"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: form.cancelledBy || '',
+    onChange: e => setForm(f => ({
+      ...f,
+      cancelledBy: e.target.value
+    })),
+    className: "w-full border border-stone-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-stone-900"
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Not recorded"), CANCELLED_BY.map(c => /*#__PURE__*/React.createElement("option", {
+    key: c,
+    value: c
+  }, c)))), form.status !== 'Proposed' && /*#__PURE__*/React.createElement(OutfitFields, {
     outfit: form.outfit,
     people: people || [],
     onChange: v => setForm(f => ({
