@@ -1725,6 +1725,8 @@ function loadImageEl(file) {
 const PANEL_MAX_ASPECT = 1.3;     // height / width per panel
 const PANEL_OVERLAP = 0.06;       // fraction of panel height repeated
 const PANEL_WIDTH_CAP = 1100;     // px sent to the API — legible, and a third of the memory of 1400
+// Locating a small thumbnail needs more detail than reading text does.
+const PHOTO_PANEL_WIDTH_CAP = 1400;
 // Sections of four are read separately now, so a tall screenshot no longer has
 // to fit one request. 24 panels covers roughly a 31:1 image.
 const MAX_PANELS = 24;
@@ -1766,9 +1768,10 @@ function sliceImageToPanels(imgEl) {
 }
 
 // Encode one panel to JPEG, then release the canvas immediately.
-function renderPanel(imgEl, plan) {
+function renderPanel(imgEl, plan, widthCap) {
   const W = imgEl.naturalWidth;
-  const scale = Math.min(2, PANEL_WIDTH_CAP / W, 1500 / plan.sh);
+  const cap = widthCap || PANEL_WIDTH_CAP;
+  const scale = Math.min(2, cap / W, 1500 / plan.sh);
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(W * scale));
   canvas.height = Math.max(1, Math.round(plan.sh * scale));
@@ -1803,36 +1806,40 @@ function cropCanvas(imgEl, sx, sy, sw, sh, maxEdge, quality) {
 // that straddles a panel boundary was being cropped in half — so this asks for
 // coordinates against the WHOLE image and stitches boxes that were cut by a seam.
 
-const PHOTO_SCAN_PROMPT = `These images are consecutive vertical slices of ONE tall screenshot of a dating profile, top to bottom. Each is labelled with the vertical range of the full screenshot it covers.
+const PHOTO_SCAN_PROMPT = `These images are up to four consecutive vertical slices of ONE tall screenshot of a dating profile, top to bottom, labelled Slice 1, Slice 2, etc. in that order.
 
-Your ONLY job is to locate the PHOTOGRAPHS OF THE PERSON. Ignore all text.
+Your ONLY job is to locate every PHOTOGRAPH OF THE PERSON. Ignore all text.
 
-WHAT COUNTS:
-- A photograph showing the person whose profile this is: portraits, full-length shots, her with friends, her doing something.
-- A photograph is one entry even if it is very tall or very wide.
-- If a photo is CUT OFF at the top or bottom edge of a slice, it continues into the next slice. Report the part you can see and set "cutAtTop" or "cutAtBottom" so it can be joined up.
+WHAT COUNTS — report ALL of these, however small:
+- The main profile photo.
+- EVERY additional photo, including small ones shown in a row or grid further down the profile (a strip of 3-6 square thumbnails is completely normal on a dating profile and each one is a real photograph of her, not interface — include every single one).
+- Any photo of her with friends, family, or doing an activity.
+- A photo that is very small on screen is still a photo. Do not skip it for being small.
 
-WHAT DOES NOT COUNT — never report these:
-- App interface: buttons, icons, tab bars, the status bar, badges, logos, hearts, crosses.
-- Screenshots of text, prompt cards, or blocks of writing with a coloured background.
-- Maps, charts, Spotify or Instagram embeds, blank space.
-- Tiny thumbnails under about 8% of the image width — they are interface, not photographs.
+WHAT DOES NOT COUNT — the only things to exclude:
+- App chrome: navigation bars, the status bar, tab icons, badges, hearts/crosses/star buttons, a small circular profile-picture avatar in a header bar (not the same as her actual photos in the body of the profile).
+- Prompt cards: coloured or bordered boxes containing only her written answers to profile questions, with no photo in them.
+- Maps, charts, verification badges, Spotify/Instagram embeds.
 
-COORDINATES: give x, y, width and height as fractions of the FULL screenshot, not of the slice. You are told each slice's vertical range, so convert: a box halfway down a slice covering 20%-30% has y around 0.25. Be generous rather than tight — include the whole photograph and a little margin, since a crop that cuts off her head is worse than one with a border.
+FOR EACH SLICE, report photos using coordinates LOCAL TO THAT SLICE ONLY — do not try to convert to the full image, that conversion is done separately:
+- "slice": which slice this photo appears in — 1 for the first image you were given, 2 for the second, and so on.
+- "x", "y", "width", "height": fractions from 0 to 1 of THAT SLICE's own width and height. (0,0) is the top-left of that slice image, not the full screenshot.
+- If a photo is cut off at the very top or bottom edge of the slice (rather than ending naturally within it), set "cutAtEdge": true. Otherwise false.
+- Be generous rather than tight with the box — include the whole photo and a small margin.
 
 Respond with ONLY a JSON object, no other text:
 {
 "photos": array of objects {
+  "slice": integer,
   "x": number, "y": number, "width": number, "height": number,
   "subject": "her" or "her with others" or "other",
   "shot": "face" or "upper body" or "full length" or "other",
   "quality": "clear" or "unclear",
-  "cutAtTop": true or false,
-  "cutAtBottom": true or false,
+  "cutAtEdge": true or false,
   "description": short string, a few words
 }
 }
-Order them top to bottom. If there are no photographs, return an empty array.`;
+List every photo you can see across all slices given, in the order they appear. If a profile shows six photos, expect to report six entries (or more across slices, if any is split). If there are none, return an empty array.`;
 
 function clamp01(v) {
   return Math.min(1, Math.max(0, Number(v) || 0));
@@ -1855,39 +1862,59 @@ function unionBox(a, b) {
     x, y,
     width: Math.max(a.x + a.width, b.x + b.width) - x,
     height: Math.max(a.y + a.height, b.y + b.height) - y,
-    cutAtTop: a.cutAtTop && b.cutAtTop,
-    cutAtBottom: a.cutAtBottom && b.cutAtBottom,
+    edgeTop: a.edgeTop && b.edgeTop,
+    edgeBottom: a.edgeBottom && b.edgeBottom,
     description: a.description || b.description,
   };
 }
 
-// Two boxes are the same photo if they overlap substantially, or if one ends
-// where the other begins and a cut was reported at that seam.
+// A photo is reported once per panel it appears in (the overlap between
+// adjacent panels means a small thumbnail can show up whole in both), and a
+// tall photo cut by a panel boundary is reported once per side. Both cases are
+// resolved here, working entirely in already-converted global-fraction space —
+// no fraction arithmetic happens in the prompt, so there is nothing for the
+// model to get wrong at this step.
 function joinPhotoBoxes(boxes) {
   const list = boxes
     .map(b => ({
       x: clamp01(b.x), y: clamp01(b.y),
       width: Math.max(0, Math.min(1 - clamp01(b.x), Number(b.width) || 0)),
       height: Math.max(0, Math.min(1 - clamp01(b.y), Number(b.height) || 0)),
+      panel: Number(b.panel) || 0,
+      edgeTop: !!b.edgeTop,
+      edgeBottom: !!b.edgeBottom,
       subject: b.subject || 'other',
       shot: b.shot || 'other',
       quality: b.quality === 'unclear' ? 'unclear' : 'clear',
-      cutAtTop: b.cutAtTop === true,
-      cutAtBottom: b.cutAtBottom === true,
       description: String(b.description || '').slice(0, 80),
     }))
-    .filter(b => b.width > 0.02 && b.height > 0.005)
-    .sort((a, b) => a.y - b.y);
+    .filter(b => b.width > 0.002 && b.height > 0.002)
+    .sort((a, b) => a.y - b.y || a.panel - b.panel);
 
   const out = [];
   list.forEach(box => {
     const hit = out.findIndex(prev => {
-      if (boxOverlap(prev, box) > 0.35) return true;
-      // A seam join: same column, prev cut at its bottom, this cut at its top,
-      // and the two edges meet within a small tolerance.
-      const sameColumn = Math.abs(prev.x - box.x) < 0.12 && Math.abs(prev.width - box.width) < 0.18;
-      const meets = Math.abs((prev.y + prev.height) - box.y) < 0.035;
-      return sameColumn && meets && (prev.cutAtBottom || box.cutAtTop);
+      // The same real region reported from two overlapping panels: near-total
+      // overlap regardless of whether either side reported an edge cut.
+      if (boxOverlap(prev, box) > 0.5) return true;
+      // A tall photo split by a panel boundary: adjacent panels, roughly the
+      // same column, and the cut side of each faces the other.
+      if (box.panel !== prev.panel + 1) return false;
+      const sameColumn = Math.abs(prev.x - box.x) < 0.15 && Math.abs(prev.width - box.width) < 0.20;
+      // The gap in GLOBAL fraction space is the real evidence: the two pieces of
+      // one continuous photo sit almost exactly where the panel overlap left
+      // them, whereas two distinct stacked photos normally have visible
+      // separation. This matters more than the edge flags on their own.
+      const gap = box.y - (prev.y + prev.height);
+      // Known trade-off: two different full-bleed photos stacked with no visible
+      // margin between them, each filling most of its own panel, are geometrically
+      // indistinguishable from one photo split by the scan boundary and will merge
+      // into one taller crop. Rare in practice (profiles almost always leave a
+      // gap, caption or text block between separate photos), and the alternative
+      // — requiring the model's self-reported cut flag as well — reintroduces
+      // missed joins whenever it forgets to set that flag, which is the bug this
+      // rewrite exists to fix. Biased toward not losing photos.
+      return sameColumn && gap > -0.08 && gap < 0.035 && prev.edgeBottom && box.edgeTop;
     });
     if (hit >= 0) out[hit] = unionBox(out[hit], box);
     else out.push(box);
@@ -1895,28 +1922,60 @@ function joinPhotoBoxes(boxes) {
   return out;
 }
 
+// Photos get their own pass over the whole image. Two things matter for this to
+// actually find what is there:
+//  1. The model is only ever asked for coordinates LOCAL to one slice — the
+//     slice-to-full-image conversion is exact arithmetic done here, not a guess
+//     the model makes. Asking a vision model to convert "y=0.4 in a slice
+//     spanning 20%-35%" into a full-image fraction is exactly the kind of
+//     arithmetic that comes back wrong or approximate, and a wrong box crops
+//     the wrong region — which is what "resolution" complaints usually are.
+//  2. Small additional photos (the row of thumbnails under the main photo on
+//     most dating profiles) must not be filtered by size. An earlier version of
+//     this prompt excluded anything under 8% of the image width on the theory
+//     that it was interface — that excluded most of a typical profile's photos.
 async function scanForPhotos(imgEl, plans, onProgress) {
   if (onProgress) onProgress('Looking for photos…');
   const found = [];
-  const CHUNK = 4;
+  const CHUNK = 2;   // fewer per call = less chance of a box being pinned to the wrong slice
   for (let i = 0; i < plans.length; i += CHUNK) {
     const chunk = plans.slice(i, i + CHUNK);
     const blocks = [];
-    chunk.forEach(plan => {
+    chunk.forEach((plan, idx) => {
+      blocks.push({ type: 'text', text: 'Slice ' + (idx + 1) + ' of ' + chunk.length + ':' });
       blocks.push({
-        type: 'text',
-        text: 'Slice covering ' + (plan.y0 * 100).toFixed(1) + '% to ' + (plan.y1 * 100).toFixed(1)
-          + '% of the full screenshot, vertically:',
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/jpeg', data: renderPanel(imgEl, plan, PHOTO_PANEL_WIDTH_CAP) },
       });
-      blocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: renderPanel(imgEl, plan) } });
     });
     blocks.push({ type: 'text', text: PHOTO_SCAN_PROMPT });
     try {
-      const res = await callVision(blocks, 2000);
-      (Array.isArray(res && res.photos) ? res.photos : []).forEach(p => found.push(p));
+      const res = await callVision(blocks, 2500);
+      // A box drawn for a genuinely cut-off photo rarely reaches exactly 0 or 1 —
+      // the model rounds to what it can see, which stops a little short of the
+      // true edge. 3% was too strict and this is the reason halves failed to
+      // rejoin; 10% catches real cuts without much risk, since it is combined
+      // with a tight gap check below before anything actually merges.
+      const EDGE = 0.10;
+      (Array.isArray(res && res.photos) ? res.photos : []).forEach(p => {
+        const slot = Math.max(1, Math.min(chunk.length, Number(p.slice) || 1)) - 1;
+        const plan = chunk[slot];
+        const lx = clamp01(p.x), ly = clamp01(p.y);
+        const lw = Math.max(0, Math.min(1 - lx, Number(p.width) || 0));
+        const lh = Math.max(0, Math.min(1 - ly, Number(p.height) || 0));
+        found.push({
+          x: lx, width: lw,
+          y: plan.y0 + ly * (plan.y1 - plan.y0),
+          height: lh * (plan.y1 - plan.y0),
+          panel: plan.index,
+          edgeTop: ly <= EDGE,
+          edgeBottom: (ly + lh) >= 1 - EDGE,
+          subject: p.subject, shot: p.shot, quality: p.quality, description: p.description,
+        });
+      });
     } catch (e) {
       if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY' || e.code === 'NO_CREDIT') throw e;
-      // A missed slice costs photos, not the whole import.
+      // A missed slice costs some photos, not the whole import.
     } finally {
       blocks.forEach(b => { if (b.type === 'image') b.source.data = null; });
     }
@@ -1932,7 +1991,7 @@ function cropPhotoFromImage(imgEl, box, pad) {
   const w = Math.min(1 - x, box.width + margin * 2);
   const h = Math.min(1 - y, box.height + margin * 2);
   const sx = x * W, sy = y * H, sw = w * W, sh = h * H;
-  if (sw < 60 || sh < 60) return null;
+  if (sw < 40 || sh < 40) return null;
   return {
     dataUrl: cropCanvas(imgEl, sx, sy, sw, sh, PHOTO_VIEW_EDGE, 0.82),
     fullDataUrl: cropCanvas(imgEl, sx, sy, sw, sh, PHOTO_FULL_EDGE, 0.88),
@@ -4074,12 +4133,20 @@ function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickMa
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.1.1';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '3.1.1', date: '2026-09-04', changes: [
+      ['fixed', 'The 3.1.0 photo rewrite made things worse: most photos were missed and crops lost resolution — both were real bugs, now fixed'],
+      ['fixed', 'The prompt told the model to exclude anything under 8% of the image width, which is the size of a normal additional-photo thumbnail on most dating profiles — that exclusion is removed'],
+      ['fixed', 'The prompt asked the model to convert slice-local coordinates into full-image coordinates itself; that arithmetic came back wrong or imprecise, producing undersized or misplaced crops. The model now reports coordinates local to one slice only, and the conversion is exact code, not a guess'],
+      ['changed', 'Photo scanning renders at a sharper resolution than text reading, since finding a small thumbnail needs more detail than reading a sentence does'],
+    ],
+  },
   {
     version: '3.1.0', date: '2026-09-04', changes: [
       ['fixed', 'Photos spanning a panel boundary were cropped in half — they are now found in a pass over the whole image and stitched back together'],
@@ -10994,6 +11061,8 @@ function loadImageEl(file) {
 const PANEL_MAX_ASPECT = 1.3; // height / width per panel
 const PANEL_OVERLAP = 0.06; // fraction of panel height repeated
 const PANEL_WIDTH_CAP = 1100; // px sent to the API — legible, and a third of the memory of 1400
+// Locating a small thumbnail needs more detail than reading text does.
+const PHOTO_PANEL_WIDTH_CAP = 1400;
 // Sections of four are read separately now, so a tall screenshot no longer has
 // to fit one request. 24 panels covers roughly a 31:1 image.
 const MAX_PANELS = 24;
@@ -11044,9 +11113,10 @@ function sliceImageToPanels(imgEl) {
 }
 
 // Encode one panel to JPEG, then release the canvas immediately.
-function renderPanel(imgEl, plan) {
+function renderPanel(imgEl, plan, widthCap) {
   const W = imgEl.naturalWidth;
-  const scale = Math.min(2, PANEL_WIDTH_CAP / W, 1500 / plan.sh);
+  const cap = widthCap || PANEL_WIDTH_CAP;
+  const scale = Math.min(2, cap / W, 1500 / plan.sh);
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(W * scale));
   canvas.height = Math.max(1, Math.round(plan.sh * scale));
@@ -11082,36 +11152,40 @@ function cropCanvas(imgEl, sx, sy, sw, sh, maxEdge, quality) {
 // that straddles a panel boundary was being cropped in half — so this asks for
 // coordinates against the WHOLE image and stitches boxes that were cut by a seam.
 
-const PHOTO_SCAN_PROMPT = `These images are consecutive vertical slices of ONE tall screenshot of a dating profile, top to bottom. Each is labelled with the vertical range of the full screenshot it covers.
+const PHOTO_SCAN_PROMPT = `These images are up to four consecutive vertical slices of ONE tall screenshot of a dating profile, top to bottom, labelled Slice 1, Slice 2, etc. in that order.
 
-Your ONLY job is to locate the PHOTOGRAPHS OF THE PERSON. Ignore all text.
+Your ONLY job is to locate every PHOTOGRAPH OF THE PERSON. Ignore all text.
 
-WHAT COUNTS:
-- A photograph showing the person whose profile this is: portraits, full-length shots, her with friends, her doing something.
-- A photograph is one entry even if it is very tall or very wide.
-- If a photo is CUT OFF at the top or bottom edge of a slice, it continues into the next slice. Report the part you can see and set "cutAtTop" or "cutAtBottom" so it can be joined up.
+WHAT COUNTS — report ALL of these, however small:
+- The main profile photo.
+- EVERY additional photo, including small ones shown in a row or grid further down the profile (a strip of 3-6 square thumbnails is completely normal on a dating profile and each one is a real photograph of her, not interface — include every single one).
+- Any photo of her with friends, family, or doing an activity.
+- A photo that is very small on screen is still a photo. Do not skip it for being small.
 
-WHAT DOES NOT COUNT — never report these:
-- App interface: buttons, icons, tab bars, the status bar, badges, logos, hearts, crosses.
-- Screenshots of text, prompt cards, or blocks of writing with a coloured background.
-- Maps, charts, Spotify or Instagram embeds, blank space.
-- Tiny thumbnails under about 8% of the image width — they are interface, not photographs.
+WHAT DOES NOT COUNT — the only things to exclude:
+- App chrome: navigation bars, the status bar, tab icons, badges, hearts/crosses/star buttons, a small circular profile-picture avatar in a header bar (not the same as her actual photos in the body of the profile).
+- Prompt cards: coloured or bordered boxes containing only her written answers to profile questions, with no photo in them.
+- Maps, charts, verification badges, Spotify/Instagram embeds.
 
-COORDINATES: give x, y, width and height as fractions of the FULL screenshot, not of the slice. You are told each slice's vertical range, so convert: a box halfway down a slice covering 20%-30% has y around 0.25. Be generous rather than tight — include the whole photograph and a little margin, since a crop that cuts off her head is worse than one with a border.
+FOR EACH SLICE, report photos using coordinates LOCAL TO THAT SLICE ONLY — do not try to convert to the full image, that conversion is done separately:
+- "slice": which slice this photo appears in — 1 for the first image you were given, 2 for the second, and so on.
+- "x", "y", "width", "height": fractions from 0 to 1 of THAT SLICE's own width and height. (0,0) is the top-left of that slice image, not the full screenshot.
+- If a photo is cut off at the very top or bottom edge of the slice (rather than ending naturally within it), set "cutAtEdge": true. Otherwise false.
+- Be generous rather than tight with the box — include the whole photo and a small margin.
 
 Respond with ONLY a JSON object, no other text:
 {
 "photos": array of objects {
+  "slice": integer,
   "x": number, "y": number, "width": number, "height": number,
   "subject": "her" or "her with others" or "other",
   "shot": "face" or "upper body" or "full length" or "other",
   "quality": "clear" or "unclear",
-  "cutAtTop": true or false,
-  "cutAtBottom": true or false,
+  "cutAtEdge": true or false,
   "description": short string, a few words
 }
 }
-Order them top to bottom. If there are no photographs, return an empty array.`;
+List every photo you can see across all slices given, in the order they appear. If a profile shows six photos, expect to report six entries (or more across slices, if any is split). If there are none, return an empty array.`;
 function clamp01(v) {
   return Math.min(1, Math.max(0, Number(v) || 0));
 }
@@ -11134,59 +11208,92 @@ function unionBox(a, b) {
     y,
     width: Math.max(a.x + a.width, b.x + b.width) - x,
     height: Math.max(a.y + a.height, b.y + b.height) - y,
-    cutAtTop: a.cutAtTop && b.cutAtTop,
-    cutAtBottom: a.cutAtBottom && b.cutAtBottom,
+    edgeTop: a.edgeTop && b.edgeTop,
+    edgeBottom: a.edgeBottom && b.edgeBottom,
     description: a.description || b.description
   };
 }
 
-// Two boxes are the same photo if they overlap substantially, or if one ends
-// where the other begins and a cut was reported at that seam.
+// A photo is reported once per panel it appears in (the overlap between
+// adjacent panels means a small thumbnail can show up whole in both), and a
+// tall photo cut by a panel boundary is reported once per side. Both cases are
+// resolved here, working entirely in already-converted global-fraction space —
+// no fraction arithmetic happens in the prompt, so there is nothing for the
+// model to get wrong at this step.
 function joinPhotoBoxes(boxes) {
   const list = boxes.map(b => ({
     x: clamp01(b.x),
     y: clamp01(b.y),
     width: Math.max(0, Math.min(1 - clamp01(b.x), Number(b.width) || 0)),
     height: Math.max(0, Math.min(1 - clamp01(b.y), Number(b.height) || 0)),
+    panel: Number(b.panel) || 0,
+    edgeTop: !!b.edgeTop,
+    edgeBottom: !!b.edgeBottom,
     subject: b.subject || 'other',
     shot: b.shot || 'other',
     quality: b.quality === 'unclear' ? 'unclear' : 'clear',
-    cutAtTop: b.cutAtTop === true,
-    cutAtBottom: b.cutAtBottom === true,
     description: String(b.description || '').slice(0, 80)
-  })).filter(b => b.width > 0.02 && b.height > 0.005).sort((a, b) => a.y - b.y);
+  })).filter(b => b.width > 0.002 && b.height > 0.002).sort((a, b) => a.y - b.y || a.panel - b.panel);
   const out = [];
   list.forEach(box => {
     const hit = out.findIndex(prev => {
-      if (boxOverlap(prev, box) > 0.35) return true;
-      // A seam join: same column, prev cut at its bottom, this cut at its top,
-      // and the two edges meet within a small tolerance.
-      const sameColumn = Math.abs(prev.x - box.x) < 0.12 && Math.abs(prev.width - box.width) < 0.18;
-      const meets = Math.abs(prev.y + prev.height - box.y) < 0.035;
-      return sameColumn && meets && (prev.cutAtBottom || box.cutAtTop);
+      // The same real region reported from two overlapping panels: near-total
+      // overlap regardless of whether either side reported an edge cut.
+      if (boxOverlap(prev, box) > 0.5) return true;
+      // A tall photo split by a panel boundary: adjacent panels, roughly the
+      // same column, and the cut side of each faces the other.
+      if (box.panel !== prev.panel + 1) return false;
+      const sameColumn = Math.abs(prev.x - box.x) < 0.15 && Math.abs(prev.width - box.width) < 0.20;
+      // The gap in GLOBAL fraction space is the real evidence: the two pieces of
+      // one continuous photo sit almost exactly where the panel overlap left
+      // them, whereas two distinct stacked photos normally have visible
+      // separation. This matters more than the edge flags on their own.
+      const gap = box.y - (prev.y + prev.height);
+      // Known trade-off: two different full-bleed photos stacked with no visible
+      // margin between them, each filling most of its own panel, are geometrically
+      // indistinguishable from one photo split by the scan boundary and will merge
+      // into one taller crop. Rare in practice (profiles almost always leave a
+      // gap, caption or text block between separate photos), and the alternative
+      // — requiring the model's self-reported cut flag as well — reintroduces
+      // missed joins whenever it forgets to set that flag, which is the bug this
+      // rewrite exists to fix. Biased toward not losing photos.
+      return sameColumn && gap > -0.08 && gap < 0.035 && prev.edgeBottom && box.edgeTop;
     });
     if (hit >= 0) out[hit] = unionBox(out[hit], box);else out.push(box);
   });
   return out;
 }
+
+// Photos get their own pass over the whole image. Two things matter for this to
+// actually find what is there:
+//  1. The model is only ever asked for coordinates LOCAL to one slice — the
+//     slice-to-full-image conversion is exact arithmetic done here, not a guess
+//     the model makes. Asking a vision model to convert "y=0.4 in a slice
+//     spanning 20%-35%" into a full-image fraction is exactly the kind of
+//     arithmetic that comes back wrong or approximate, and a wrong box crops
+//     the wrong region — which is what "resolution" complaints usually are.
+//  2. Small additional photos (the row of thumbnails under the main photo on
+//     most dating profiles) must not be filtered by size. An earlier version of
+//     this prompt excluded anything under 8% of the image width on the theory
+//     that it was interface — that excluded most of a typical profile's photos.
 async function scanForPhotos(imgEl, plans, onProgress) {
   if (onProgress) onProgress('Looking for photos…');
   const found = [];
-  const CHUNK = 4;
+  const CHUNK = 2; // fewer per call = less chance of a box being pinned to the wrong slice
   for (let i = 0; i < plans.length; i += CHUNK) {
     const chunk = plans.slice(i, i + CHUNK);
     const blocks = [];
-    chunk.forEach(plan => {
+    chunk.forEach((plan, idx) => {
       blocks.push({
         type: 'text',
-        text: 'Slice covering ' + (plan.y0 * 100).toFixed(1) + '% to ' + (plan.y1 * 100).toFixed(1) + '% of the full screenshot, vertically:'
+        text: 'Slice ' + (idx + 1) + ' of ' + chunk.length + ':'
       });
       blocks.push({
         type: 'image',
         source: {
           type: 'base64',
           media_type: 'image/jpeg',
-          data: renderPanel(imgEl, plan)
+          data: renderPanel(imgEl, plan, PHOTO_PANEL_WIDTH_CAP)
         }
       });
     });
@@ -11195,11 +11302,37 @@ async function scanForPhotos(imgEl, plans, onProgress) {
       text: PHOTO_SCAN_PROMPT
     });
     try {
-      const res = await callVision(blocks, 2000);
-      (Array.isArray(res && res.photos) ? res.photos : []).forEach(p => found.push(p));
+      const res = await callVision(blocks, 2500);
+      // A box drawn for a genuinely cut-off photo rarely reaches exactly 0 or 1 —
+      // the model rounds to what it can see, which stops a little short of the
+      // true edge. 3% was too strict and this is the reason halves failed to
+      // rejoin; 10% catches real cuts without much risk, since it is combined
+      // with a tight gap check below before anything actually merges.
+      const EDGE = 0.10;
+      (Array.isArray(res && res.photos) ? res.photos : []).forEach(p => {
+        const slot = Math.max(1, Math.min(chunk.length, Number(p.slice) || 1)) - 1;
+        const plan = chunk[slot];
+        const lx = clamp01(p.x),
+          ly = clamp01(p.y);
+        const lw = Math.max(0, Math.min(1 - lx, Number(p.width) || 0));
+        const lh = Math.max(0, Math.min(1 - ly, Number(p.height) || 0));
+        found.push({
+          x: lx,
+          width: lw,
+          y: plan.y0 + ly * (plan.y1 - plan.y0),
+          height: lh * (plan.y1 - plan.y0),
+          panel: plan.index,
+          edgeTop: ly <= EDGE,
+          edgeBottom: ly + lh >= 1 - EDGE,
+          subject: p.subject,
+          shot: p.shot,
+          quality: p.quality,
+          description: p.description
+        });
+      });
     } catch (e) {
       if (e.code === 'NO_API_KEY' || e.code === 'BAD_API_KEY' || e.code === 'NO_CREDIT') throw e;
-      // A missed slice costs photos, not the whole import.
+      // A missed slice costs some photos, not the whole import.
     } finally {
       blocks.forEach(b => {
         if (b.type === 'image') b.source.data = null;
@@ -11222,7 +11355,7 @@ function cropPhotoFromImage(imgEl, box, pad) {
     sy = y * H,
     sw = w * W,
     sh = h * H;
-  if (sw < 60 || sh < 60) return null;
+  if (sw < 40 || sh < 40) return null;
   return {
     dataUrl: cropCanvas(imgEl, sx, sy, sw, sh, PHOTO_VIEW_EDGE, 0.82),
     fullDataUrl: cropCanvas(imgEl, sx, sy, sw, sh, PHOTO_FULL_EDGE, 0.88),
@@ -13542,12 +13675,16 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.1.1';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '3.1.1',
+  date: '2026-09-04',
+  changes: [['fixed', 'The 3.1.0 photo rewrite made things worse: most photos were missed and crops lost resolution — both were real bugs, now fixed'], ['fixed', 'The prompt told the model to exclude anything under 8% of the image width, which is the size of a normal additional-photo thumbnail on most dating profiles — that exclusion is removed'], ['fixed', 'The prompt asked the model to convert slice-local coordinates into full-image coordinates itself; that arithmetic came back wrong or imprecise, producing undersized or misplaced crops. The model now reports coordinates local to one slice only, and the conversion is exact code, not a guess'], ['changed', 'Photo scanning renders at a sharper resolution than text reading, since finding a small thumbnail needs more detail than reading a sentence does']]
+}, {
   version: '3.1.0',
   date: '2026-09-04',
   changes: [['fixed', 'Photos spanning a panel boundary were cropped in half — they are now found in a pass over the whole image and stitched back together'], ['changed', 'Photo detection looks for pictures of the person specifically, and ignores interface, prompt cards, maps and embeds'], ['changed', 'Her own photographs are kept first, clearest first, up to ten per screenshot'], ['added', 'Crop any photo in the app — drag the corners, save']]
