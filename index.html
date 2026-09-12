@@ -60,6 +60,11 @@
 .last\:mb-0:last-child{margin-bottom:0}
 
 .banner-title{font-size:clamp(2rem,10vw,3.5rem)}
+/* Fixed, small size regardless of how large the title itself scales — a quiet
+   suffix, not a second headline. */
+.version-suffix{font-size:clamp(.65rem,1.8vw,.875rem)}
+.align-baseline{vertical-align:baseline}
+.font-sans{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 .rounded-2xl{border-radius:1rem}
 .banner-mark{width:clamp(3.4rem,17vw,6rem);height:clamp(3.4rem,17vw,6rem)}
 .bg-stone-900{--tw-bg-opacity:1;background-color:rgb(28 25 23/var(--tw-bg-opacity,1))}
@@ -503,7 +508,11 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-07 21:52 IST';
+// build.js substitutes the real build time in below at compile time — it must
+// stay as the untouched placeholder in this source file, never a hardcoded
+// date, or every future build silently carries forward whatever date happened
+// to land here last.
+const BUILD_STAMP = '__BUILD_STAMP__';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -1703,7 +1712,9 @@ WORK OUT WHO IS WHO BEFORE YOU SUMMARISE. This is the part that goes wrong most 
 - "Delivered", "Read" and "Sent" appear under the USER's messages; a small avatar usually sits beside HERS.
 - Sense-check: if a message answers a question, it was written by whoever did not ask it. If your attribution has one person asking and answering their own questions, flip it.
 
-IGNORE PHOTOS AND MEDIA. Do not look into, describe, or interpret any image, photo, video, sticker, GIF, voice note or link preview inside the conversation. Do not spend effort on them. If one clearly carries a fact worth keeping — she sent a picture of her new dog, or a screenshot of a venue you then agreed on — record that fact in one short line and move on. Otherwise skip it entirely and never write a line that only says a photo was sent.
+NOTE PHOTOS AND MEDIA BRIEFLY — A GLANCE, NOT A DESCRIPTION. When a photo, video or voice note appears in the conversation, a quick glance is enough to say what it showed — a selfie, a dog, a beach, a boat, a house — as a few words, the way a person would casually mention it in passing. Never describe a photo in detail, analyse what's in the background, guess at where it was taken, or dwell on it beyond that one short phrase. Do not extract, transcribe, or reproduce anything from the image itself — a plain note that it was sent is all that is wanted, nothing extracted from it.
+Add it as one short point in the chronology, e.g. {"from": "she", "point": "Sent a selfie, at a café"} — not as a fact, since it belongs with the flow of the conversation, not her life details.
+Skip only pure app furniture (see below) and pure decoration with nothing to say — a plain sticker, an emoji reaction, a like. Everything else that was actually sent gets one short note of what it showed.
 
 IGNORE THE FURNITURE. A screenshot is full of things neither of you said. None of the following is ever a message, a fact, a session or an event, and none of it belongs in your output: the app's encryption notice ("Messages and calls are end-to-end encrypted"), disappearing-message notices, "You matched", "Say hi", blocked/report banners, delivery and read receipts, typing indicators, "Missed voice call" rows, date dividers themselves, unread-count separators, stickers and reaction badges, and any advertising or safety prompt the app inserts. If a whole session contains nothing but this, leave it out entirely.
 
@@ -2357,6 +2368,54 @@ function downloadDataUrl(dataUrl, filename) {
   document.body.removeChild(a);
 }
 
+// Lets the person choose where a file actually goes, rather than it landing
+// silently in a fixed downloads folder. The mechanism differs by platform,
+// since neither Android nor iOS exposes a real save dialog to a web page:
+//  - Desktop Chrome/Edge/Opera: a genuine native Save As dialog.
+//  - Android (and anywhere else Web Share supports files): the native share
+//    sheet, which offers Drive, Files, a folder, or any app that takes a file
+//    — the nearest thing Android actually gives a web page to "choose a
+//    destination".
+//  - Everywhere else: the plain download link this always used, unchanged.
+// Returns 'saved', 'downloaded', or 'cancelled' — 'cancelled' means he backed
+// out of a picker or share sheet deliberately, so the caller must not treat
+// that as a completed export.
+async function saveFileToChosenLocation(content, filename, mimeType) {
+  if (typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function') {
+    try {
+      const ext = filename.includes('.') ? '.' + filename.split('.').pop() : '';
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: ext ? [{ description: 'Backup file', accept: { [mimeType]: [ext] } }] : undefined,
+      });
+      const writable = await handle.createWritable();
+      await writable.write(new Blob([content], { type: mimeType }));
+      await writable.close();
+      return 'saved';
+    } catch (e) {
+      if (e && e.name === 'AbortError') return 'cancelled';
+      // Any other failure (permission denied, etc.) — fall through and still
+      // get the file to him some way rather than leaving him with nothing.
+    }
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.share) {
+    try {
+      const file = new File([content], filename, { type: mimeType });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file] });
+        return 'saved';
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') return 'cancelled';
+    }
+  }
+
+  const dataUrl = 'data:' + mimeType + ';charset=utf-8,' + encodeURIComponent(content);
+  downloadDataUrl(dataUrl, filename);
+  return 'downloaded';
+}
+
 // Point-level de-duplication. Re-importing a screenshot, or two screenshots that
 // overlap where the scroll was cut, must not log the same thing twice.
 function normaliseMsg(text) {
@@ -2780,15 +2839,10 @@ async function extractChatPayload(files, onProgress) {
       || markers.some(mk => needsCaptureDate(mk))
       || !dateMarkers.length
     ),
-    // Every relative divider seen by either pass, so none is silently resolved.
-    relativeLabels: Array.from(new Set(
-      dateMarkers.filter(m => m.needsCapture).map(m => m.label)
-        .concat(sessions.filter(ses => ses && needsCaptureDate(ses.dayLabel)).map(ses => ses.dayLabel))
-        .concat(markers.filter(mk => needsCaptureDate(mk)))
-    )).filter(Boolean)
-      // "Today" anchors everything: yesterday is the day before it, a weekday is
-      // the most recent one before it. So only ever ask about the anchor.
-      .sort((a, b) => relativeRank(a) - relativeRank(b)),
+    // Every relative divider seen by either pass, kept with the panel it was
+    // found in — needed to tell whether it sits before or after the anchor in
+    // the actual conversation, not just what word it uses.
+    relativeLabels: collectRelativeLabelInfo(dateMarkers, sessions, markers),
     earliestCapture: earliestPossibleCapture(dateMarkers),
     assumedDates: dateMarkers.some(m => m.assumed),
   };
@@ -2893,9 +2947,48 @@ function captureFromLabel(label, labelDate) {
   return labelDate;                     // "Today", a weekday, or nothing named
 }
 
+// Each relative label carries where in the chat it was found — which panel —
+// so its position relative to the anchor can be compared, not just its text.
 function anchorLabel(labels) {
-  const sorted = [...(labels || [])].sort((a, b) => relativeRank(a) - relativeRank(b));
-  return sorted[0] || '';
+  const sorted = [...(labels || [])].sort((a, b) => relativeRank(a.label) - relativeRank(b.label));
+  return sorted[0] || { label: '', panel: null };
+}
+
+// Once the anchor's real date is confirmed, another relative label in the same
+// chat is resolved forward or backward depending on which side of the anchor
+// it actually sits on in the conversation — not a single fixed guess applied
+// to every label regardless of where it fell. "Monday" confirmed as the 7th
+// does not make an earlier "Tuesday" the 8th just because forward is the
+// default; if Tuesday's panel comes before Monday's, it must resolve backward.
+// Folds the three sources of relative labels — the dedicated date scan, each
+// session's own divider, and the reader's simpler self-reported list — into one
+// deduplicated set, keeping the earliest panel seen for each distinct label so
+// its position in the chat is never lost.
+function collectRelativeLabelInfo(dateMarkers, sessions, plainMarkers) {
+  const byLabel = new Map();
+  const consider = (label, panel) => {
+    if (!label || !needsCaptureDate(label)) return;
+    const key = normaliseMsg(label);
+    const existing = byLabel.get(key);
+    const p = Number.isFinite(panel) ? panel : null;
+    if (!existing) { byLabel.set(key, { label, panel: p }); return; }
+    if (p !== null && (existing.panel === null || p < existing.panel)) existing.panel = p;
+  };
+  (dateMarkers || []).forEach(m => consider(m.label, m.panel));
+  (sessions || []).forEach(ses => consider(ses && ses.dayLabel, ses && ses.panel));
+  (plainMarkers || []).forEach(l => consider(l, null));
+  return [...byLabel.values()].sort((a, b) => relativeRank(a.label) - relativeRank(b.label));
+}
+
+function resolveRelativeLabel(entry, anchor, captureDate) {
+  if (!entry || !entry.label) return captureDate;
+  if (Number.isFinite(entry.panel) && Number.isFinite(anchor.panel) && entry.panel !== anchor.panel) {
+    const forward = entry.panel > anchor.panel;
+    return parseDayLabel(entry.label, captureDate, forward) || captureDate;
+  }
+  // No panel to compare (an older self-reported label with no position) —
+  // this is now the rare case, since both passes tag their finds with one.
+  return parseDayLabel(entry.label, captureDate) || captureDate;
 }
 
 function datedSessions(sessions, fallbackDate, markers) {
@@ -2939,9 +3032,13 @@ function datedSessions(sessions, fallbackDate, markers) {
       ses.date = parseDayLabel(ses.dayLabel, base);
       return;
     }
+    // A bare weekday with no dated neighbour anywhere near it must still
+    // prefer the date he just confirmed over today's real-world date — this is
+    // exactly the chat the confirmation dialog exists for: nothing absolute in
+    // it at all. Falling back to TODAY() here silently discarded his answer.
     ses.date = before
       ? parseDayLabel(ses.dayLabel, before, true)
-      : parseDayLabel(ses.dayLabel, anchorFor(i) || TODAY());
+      : parseDayLabel(ses.dayLabel, anchorFor(i) || fallbackDate || TODAY());
   });
 
   // 4. Unlabelled sessions sit with their neighbours.
@@ -4569,12 +4666,30 @@ function SharedImageModal({ state, people, onProfile, onChat, onCancel, onPickMa
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '3.4.0';
+const APP_VERSION = '3.5.2';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [
+  {
+    version: '3.5.2', date: '2026-09-13', changes: [
+      ['fixed', 'The build stamp had been frozen at 7 August: the placeholder build.js substitutes at compile time had been overwritten with a hardcoded date, so every build since silently carried that same stale timestamp forward'],
+      ['added', 'The version number now appears as a small suffix next to the name in the header'],
+    ],
+  },
+  {
+    version: '3.5.1', date: '2026-09-13', changes: [
+      ['fixed', 'A relative label like "Tuesday" was always resolved backward from a confirmed date regardless of whether it actually appeared before or after it in the chat — its position in the conversation is now compared against the confirmed label\'s, so the direction is worked out rather than guessed'],
+      ['fixed', 'A bare weekday divider with no dated neighbour nearby fell back to today\'s real date instead of the date just confirmed in the dialog, silently discarding the answer in exactly the chats that dialog exists for'],
+    ],
+  },
+  {
+    version: '3.5.0', date: '2026-09-13', changes: [
+      ['changed', 'Chat reading now gives a photo or video a quick glance and one short note of what it showed — a selfie, a dog, a beach — instead of ignoring it outright'],
+      ['added', 'Exporting a backup now offers a real choice of where it goes: a native Save dialog on desktop, the share sheet (Drive, Files, any app) on Android, falling back to a plain download only where neither exists'],
+    ],
+  },
   {
     version: '3.4.0', date: '2026-09-12', changes: [
       ['added', 'Two earlier stages: New match (matched, nothing said yet) and Crossed paths (met in person, waiting to run into her again) — before Talking Stage even applies'],
@@ -6743,7 +6858,9 @@ function RelationshipTracker() {
       <div className="w-full bg-stone-900 text-stone-50">
         <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-center gap-3">
           <PlatesMark className="banner-mark shrink-0 rounded-2xl" />
-          <h1 className="banner-title font-serif tracking-tight leading-none">Spinning Plates</h1>
+          <h1 className="banner-title font-serif tracking-tight leading-none">
+            Spinning Plates<span className="version-suffix font-sans text-stone-400 ml-1.5 align-baseline">v{APP_VERSION}</span>
+          </h1>
         </div>
       </div>
 
@@ -7389,16 +7506,16 @@ function ChatDateConfirmModal({ info, onCancel, onConfirm }) {
   const labels = payload.relativeLabels || [];
   const floor = payload.earliestCapture || '';
   const anchor = anchorLabel(labels);
-  const others = labels.filter(l => l !== anchor);
+  const others = labels.filter(l => l.label !== anchor.label);
 
   // He answers about the words on screen — "Yesterday was the 9th" — and the
   // capture date is worked out from that. Asking for two different things in one
   // box was the confusion.
-  const isYesterday = /yesterday/i.test(anchor);
+  const isYesterday = /yesterday/i.test(anchor.label);
   const defaultAnswer = isYesterday ? shiftDate(TODAY(), -1) : TODAY();
   const [answer, setAnswer] = useState(defaultAnswer);
 
-  const capture = captureFromLabel(anchor, answer);
+  const capture = captureFromLabel(anchor.label, answer);
   const tooEarly = floor && capture < floor;
 
   const quick = isYesterday
@@ -7411,12 +7528,12 @@ function ChatDateConfirmModal({ info, onCancel, onConfirm }) {
         <div className="flex items-start gap-2 mb-2">
           <Calendar className="w-4 h-4 text-stone-600 mt-1 shrink-0" />
           <h3 className="font-serif text-lg leading-tight">
-            {anchor ? 'The chat says "' + anchor + '". What date was that?' : 'When was this screenshot taken?'}
+            {anchor.label ? 'The chat says "' + anchor.label + '". What date was that?' : 'When was this screenshot taken?'}
           </h3>
         </div>
 
         <p className="text-sm text-stone-700">
-          {anchor
+          {anchor.label
             ? 'Pick the actual date those messages were sent. Everything else in the chat follows from it.'
             : 'No date could be read from this chat, so give the day you took the screenshot.'}
         </p>
@@ -7436,16 +7553,16 @@ function ChatDateConfirmModal({ info, onCancel, onConfirm }) {
           ))}
         </div>
 
-        {(others.length > 0 || anchor) && (
+        {(others.length > 0 || anchor.label) && (
           <div className="mt-3 border-t border-stone-100 pt-2 space-y-0.5">
-            {anchor && (
+            {anchor.label && (
               <p className="text-[11px] text-stone-500">
-                "{anchor}" → {formatDayLabel(answer)}
+                "{anchor.label}" → {formatDayLabel(answer)}
               </p>
             )}
             {others.map((l, i) => (
               <p key={i} className="text-[11px] text-stone-500">
-                "{l}" → {formatDayLabel(parseDayLabel(l, capture) || capture)}
+                "{l.label}" → {formatDayLabel(resolveRelativeLabel(l, anchor, capture))}
               </p>
             ))}
             <p className="text-[11px] text-stone-400 pt-1">
@@ -9220,7 +9337,7 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
       setMode(match ? 'existing' : 'new');
       setPersonId(match ? match.x.id : (people[0] ? people[0].id : ''));
       setNewName(p.contactName || '');
-      setDateValue(/yesterday/i.test(anchorLabel(p.relativeLabels || [])) ? shiftDate(TODAY(), -1) : TODAY());
+      setDateValue(/yesterday/i.test(anchorLabel(p.relativeLabels || []).label) ? shiftDate(TODAY(), -1) : TODAY());
       setPhase('review');
     } catch (err) {
       setErrMsg((err && err.fileName ? err.fileName + ': ' : '')
@@ -9276,7 +9393,7 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
     setPhase('loading');
     setProgress('Saving…');
     const capture = payload.needsDate
-      ? captureFromLabel(anchorLabel(payload.relativeLabels || []), dateValue)
+      ? captureFromLabel(anchorLabel(payload.relativeLabels || []).label, dateValue)
       : null;
     const res = await onCommit(payload, targetId, capture);
     next(qIndex, label + ' — ' + res.added + ' line' + (res.added === 1 ? '' : 's')
@@ -9423,20 +9540,20 @@ function ChatImportModal({ people, onCommit, onCreatePerson, onClose, initialFil
               {payload.needsDate && (() => {
                   const labels = payload.relativeLabels || [];
                   const anchor = anchorLabel(labels);
-                  const capture = captureFromLabel(anchor, dateValue);
+                  const capture = captureFromLabel(anchor.label, dateValue);
                   return (
                     <Field
-                      label={anchor
-                        ? 'The chat says "' + anchor + '". What date was that?'
+                      label={anchor.label
+                        ? 'The chat says "' + anchor.label + '". What date was that?'
                         : 'No date in this chat — when was it taken?'}
                       hint="Everything else follows from this."
                     >
                       <input type="date" value={dateValue} max={TODAY()}
                         onChange={e => setDateValue(e.target.value)} className={selectCls} />
                       <div className="mt-1.5 space-y-0.5">
-                        {labels.filter(l => l !== anchor).slice(0, 3).map((l, i) => (
+                        {labels.filter(l => l.label !== anchor.label).slice(0, 3).map((l, i) => (
                           <p key={i} className="text-[11px] text-stone-500">
-                            "{l}" → {formatDayLabel(parseDayLabel(l, capture) || capture)}
+                            "{l.label}" → {formatDayLabel(resolveRelativeLabel(l, anchor, capture))}
                           </p>
                         ))}
                         <p className="text-[11px] text-stone-400">Screenshot taken {formatDayLabel(capture)}.</p>
@@ -9934,6 +10051,8 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
   const [importErr, setImportErr] = useState('');
   const [pending, setPending] = useState(null);
   const [confirmReplace, setConfirmReplace] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportOutcome, setExportOutcome] = useState('');
   const importInputRef = React.useRef(null);
 
   function saveKey() {
@@ -9947,12 +10066,18 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
     setApiKey('');
   }
 
-  function exportData() {
+  async function exportData() {
+    setExportBusy(true);
+    setExportOutcome('');
     const blob = { exportedAt: new Date().toISOString(), version: APP_VERSION, build: BUILD_STAMP, people };
-    const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(blob, null, 2));
-    downloadDataUrl(dataUrl, 'spinning-plates-backup.json');
+    const content = JSON.stringify(blob, null, 2);
+    const result = await saveFileToChosenLocation(content, 'spinning-plates-backup.json', 'application/json');
+    setExportBusy(false);
+    if (result === 'cancelled') return;   // he backed out — nothing was saved, so the nag stays live
     Local.set('rt:last-export', TODAY());
     if (onExported) onExported(TODAY());
+    setExportOutcome(result === 'saved' ? 'Saved.' : 'Downloaded.');
+    setTimeout(() => setExportOutcome(''), 2500);
   }
 
   function handleImportFile(e) {
@@ -10039,8 +10164,9 @@ function SettingsModal({ onClose, people, onImportData, syncState, onConnectSync
               device/browser, then import it there.
             </p>
             <div className="flex items-center gap-2">
-              <button onClick={exportData} className="flex-1 flex items-center justify-center gap-1.5 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
-                <Download className="w-4 h-4" /> Export backup
+              <button onClick={exportData} disabled={exportBusy}
+                className="flex-1 flex items-center justify-center gap-1.5 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100 disabled:opacity-60">
+                <Download className="w-4 h-4" /> {exportBusy ? 'Waiting…' : exportOutcome || 'Export backup'}
               </button>
               <button onClick={() => importInputRef.current && importInputRef.current.click()} className="flex-1 flex items-center justify-center gap-1.5 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100">
                 <Upload className="w-4 h-4" /> Import backup
@@ -10441,7 +10567,11 @@ const Local = {
 };
 
 // Bumped on every build so it's obvious which version a device is running.
-const BUILD_STAMP = '2026-08-07 21:52 IST';
+// build.js substitutes the real build time in below at compile time — it must
+// stay as the untouched placeholder in this source file, never a hardcoded
+// date, or every future build silently carries forward whatever date happened
+// to land here last.
+const BUILD_STAMP = '2026-09-12 17:57 IST';
 
 // ---------- Cross-device sync (private GitHub Gist) ----------
 // The whole dataset is kept as one JSON file in a private Gist. A personal
@@ -11858,7 +11988,9 @@ WORK OUT WHO IS WHO BEFORE YOU SUMMARISE. This is the part that goes wrong most 
 - "Delivered", "Read" and "Sent" appear under the USER's messages; a small avatar usually sits beside HERS.
 - Sense-check: if a message answers a question, it was written by whoever did not ask it. If your attribution has one person asking and answering their own questions, flip it.
 
-IGNORE PHOTOS AND MEDIA. Do not look into, describe, or interpret any image, photo, video, sticker, GIF, voice note or link preview inside the conversation. Do not spend effort on them. If one clearly carries a fact worth keeping — she sent a picture of her new dog, or a screenshot of a venue you then agreed on — record that fact in one short line and move on. Otherwise skip it entirely and never write a line that only says a photo was sent.
+NOTE PHOTOS AND MEDIA BRIEFLY — A GLANCE, NOT A DESCRIPTION. When a photo, video or voice note appears in the conversation, a quick glance is enough to say what it showed — a selfie, a dog, a beach, a boat, a house — as a few words, the way a person would casually mention it in passing. Never describe a photo in detail, analyse what's in the background, guess at where it was taken, or dwell on it beyond that one short phrase. Do not extract, transcribe, or reproduce anything from the image itself — a plain note that it was sent is all that is wanted, nothing extracted from it.
+Add it as one short point in the chronology, e.g. {"from": "she", "point": "Sent a selfie, at a café"} — not as a fact, since it belongs with the flow of the conversation, not her life details.
+Skip only pure app furniture (see below) and pure decoration with nothing to say — a plain sticker, an emoji reaction, a like. Everything else that was actually sent gets one short note of what it showed.
 
 IGNORE THE FURNITURE. A screenshot is full of things neither of you said. None of the following is ever a message, a fact, a session or an event, and none of it belongs in your output: the app's encryption notice ("Messages and calls are end-to-end encrypted"), disappearing-message notices, "You matched", "Say hi", blocked/report banners, delivery and read receipts, typing indicators, "Missed voice call" rows, date dividers themselves, unread-count separators, stickers and reaction badges, and any advertising or safety prompt the app inserts. If a whole session contains nothing but this, leave it out entirely.
 
@@ -12584,6 +12716,65 @@ function downloadDataUrl(dataUrl, filename) {
   document.body.removeChild(a);
 }
 
+// Lets the person choose where a file actually goes, rather than it landing
+// silently in a fixed downloads folder. The mechanism differs by platform,
+// since neither Android nor iOS exposes a real save dialog to a web page:
+//  - Desktop Chrome/Edge/Opera: a genuine native Save As dialog.
+//  - Android (and anywhere else Web Share supports files): the native share
+//    sheet, which offers Drive, Files, a folder, or any app that takes a file
+//    — the nearest thing Android actually gives a web page to "choose a
+//    destination".
+//  - Everywhere else: the plain download link this always used, unchanged.
+// Returns 'saved', 'downloaded', or 'cancelled' — 'cancelled' means he backed
+// out of a picker or share sheet deliberately, so the caller must not treat
+// that as a completed export.
+async function saveFileToChosenLocation(content, filename, mimeType) {
+  if (typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function') {
+    try {
+      const ext = filename.includes('.') ? '.' + filename.split('.').pop() : '';
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: ext ? [{
+          description: 'Backup file',
+          accept: {
+            [mimeType]: [ext]
+          }
+        }] : undefined
+      });
+      const writable = await handle.createWritable();
+      await writable.write(new Blob([content], {
+        type: mimeType
+      }));
+      await writable.close();
+      return 'saved';
+    } catch (e) {
+      if (e && e.name === 'AbortError') return 'cancelled';
+      // Any other failure (permission denied, etc.) — fall through and still
+      // get the file to him some way rather than leaving him with nothing.
+    }
+  }
+  if (typeof navigator !== 'undefined' && navigator.share) {
+    try {
+      const file = new File([content], filename, {
+        type: mimeType
+      });
+      if (navigator.canShare && navigator.canShare({
+        files: [file]
+      })) {
+        await navigator.share({
+          files: [file]
+        });
+        return 'saved';
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') return 'cancelled';
+    }
+  }
+  const dataUrl = 'data:' + mimeType + ';charset=utf-8,' + encodeURIComponent(content);
+  downloadDataUrl(dataUrl, filename);
+  return 'downloaded';
+}
+
 // Point-level de-duplication. Re-importing a screenshot, or two screenshots that
 // overlap where the scroll was cut, must not log the same thing twice.
 function normaliseMsg(text) {
@@ -13105,11 +13296,10 @@ async function extractChatPayload(files, onProgress) {
     // absolute dates sit alongside it: "Today" is whenever the screenshot was
     // taken. So it is always asked, and only skipped when nothing relative exists.
     needsDate: sessions.length > 0 && (dateMarkers.some(m => m.needsCapture) || sessions.some(ses => ses && needsCaptureDate(ses.dayLabel)) || markers.some(mk => needsCaptureDate(mk)) || !dateMarkers.length),
-    // Every relative divider seen by either pass, so none is silently resolved.
-    relativeLabels: Array.from(new Set(dateMarkers.filter(m => m.needsCapture).map(m => m.label).concat(sessions.filter(ses => ses && needsCaptureDate(ses.dayLabel)).map(ses => ses.dayLabel)).concat(markers.filter(mk => needsCaptureDate(mk))))).filter(Boolean)
-    // "Today" anchors everything: yesterday is the day before it, a weekday is
-    // the most recent one before it. So only ever ask about the anchor.
-    .sort((a, b) => relativeRank(a) - relativeRank(b)),
+    // Every relative divider seen by either pass, kept with the panel it was
+    // found in — needed to tell whether it sits before or after the anchor in
+    // the actual conversation, not just what word it uses.
+    relativeLabels: collectRelativeLabelInfo(dateMarkers, sessions, markers),
     earliestCapture: earliestPossibleCapture(dateMarkers),
     assumedDates: dateMarkers.some(m => m.assumed)
   };
@@ -13212,9 +13402,57 @@ function captureFromLabel(label, labelDate) {
   if (/tomorrow/.test(t)) return shiftDate(labelDate, -1);
   return labelDate; // "Today", a weekday, or nothing named
 }
+
+// Each relative label carries where in the chat it was found — which panel —
+// so its position relative to the anchor can be compared, not just its text.
 function anchorLabel(labels) {
-  const sorted = [...(labels || [])].sort((a, b) => relativeRank(a) - relativeRank(b));
-  return sorted[0] || '';
+  const sorted = [...(labels || [])].sort((a, b) => relativeRank(a.label) - relativeRank(b.label));
+  return sorted[0] || {
+    label: '',
+    panel: null
+  };
+}
+
+// Once the anchor's real date is confirmed, another relative label in the same
+// chat is resolved forward or backward depending on which side of the anchor
+// it actually sits on in the conversation — not a single fixed guess applied
+// to every label regardless of where it fell. "Monday" confirmed as the 7th
+// does not make an earlier "Tuesday" the 8th just because forward is the
+// default; if Tuesday's panel comes before Monday's, it must resolve backward.
+// Folds the three sources of relative labels — the dedicated date scan, each
+// session's own divider, and the reader's simpler self-reported list — into one
+// deduplicated set, keeping the earliest panel seen for each distinct label so
+// its position in the chat is never lost.
+function collectRelativeLabelInfo(dateMarkers, sessions, plainMarkers) {
+  const byLabel = new Map();
+  const consider = (label, panel) => {
+    if (!label || !needsCaptureDate(label)) return;
+    const key = normaliseMsg(label);
+    const existing = byLabel.get(key);
+    const p = Number.isFinite(panel) ? panel : null;
+    if (!existing) {
+      byLabel.set(key, {
+        label,
+        panel: p
+      });
+      return;
+    }
+    if (p !== null && (existing.panel === null || p < existing.panel)) existing.panel = p;
+  };
+  (dateMarkers || []).forEach(m => consider(m.label, m.panel));
+  (sessions || []).forEach(ses => consider(ses && ses.dayLabel, ses && ses.panel));
+  (plainMarkers || []).forEach(l => consider(l, null));
+  return [...byLabel.values()].sort((a, b) => relativeRank(a.label) - relativeRank(b.label));
+}
+function resolveRelativeLabel(entry, anchor, captureDate) {
+  if (!entry || !entry.label) return captureDate;
+  if (Number.isFinite(entry.panel) && Number.isFinite(anchor.panel) && entry.panel !== anchor.panel) {
+    const forward = entry.panel > anchor.panel;
+    return parseDayLabel(entry.label, captureDate, forward) || captureDate;
+  }
+  // No panel to compare (an older self-reported label with no position) —
+  // this is now the rare case, since both passes tag their finds with one.
+  return parseDayLabel(entry.label, captureDate) || captureDate;
 }
 function datedSessions(sessions, fallbackDate, markers) {
   const list = (sessions || []).filter(Boolean).map(ses => ({
@@ -13259,7 +13497,11 @@ function datedSessions(sessions, fallbackDate, markers) {
       ses.date = parseDayLabel(ses.dayLabel, base);
       return;
     }
-    ses.date = before ? parseDayLabel(ses.dayLabel, before, true) : parseDayLabel(ses.dayLabel, anchorFor(i) || TODAY());
+    // A bare weekday with no dated neighbour anywhere near it must still
+    // prefer the date he just confirmed over today's real-world date — this is
+    // exactly the chat the confirmation dialog exists for: nothing absolute in
+    // it at all. Falling back to TODAY() here silently discarded his answer.
+    ses.date = before ? parseDayLabel(ses.dayLabel, before, true) : parseDayLabel(ses.dayLabel, anchorFor(i) || fallbackDate || TODAY());
   });
 
   // 4. Unlabelled sessions sit with their neighbours.
@@ -14980,12 +15222,24 @@ function SharedImageModal({
 // shape, MINOR for new features, PATCH for fixes. The build stamp below is the
 // compile time, used to confirm which build a device is actually running.
 
-const APP_VERSION = '3.4.0';
+const APP_VERSION = '3.5.2';
 
 // Entries newest first. Types follow Keep a Changelog: added / changed / fixed /
 // removed / security. Versions before 1.1.0 were reconstructed from the
 // development history, so their dates are approximate.
 const CHANGELOG = [{
+  version: '3.5.2',
+  date: '2026-09-13',
+  changes: [['fixed', 'The build stamp had been frozen at 7 August: the placeholder build.js substitutes at compile time had been overwritten with a hardcoded date, so every build since silently carried that same stale timestamp forward'], ['added', 'The version number now appears as a small suffix next to the name in the header']]
+}, {
+  version: '3.5.1',
+  date: '2026-09-13',
+  changes: [['fixed', 'A relative label like "Tuesday" was always resolved backward from a confirmed date regardless of whether it actually appeared before or after it in the chat — its position in the conversation is now compared against the confirmed label\'s, so the direction is worked out rather than guessed'], ['fixed', 'A bare weekday divider with no dated neighbour nearby fell back to today\'s real date instead of the date just confirmed in the dialog, silently discarding the answer in exactly the chats that dialog exists for']]
+}, {
+  version: '3.5.0',
+  date: '2026-09-13',
+  changes: [['changed', 'Chat reading now gives a photo or video a quick glance and one short note of what it showed — a selfie, a dog, a beach — instead of ignoring it outright'], ['added', 'Exporting a backup now offers a real choice of where it goes: a native Save dialog on desktop, the share sheet (Drive, Files, any app) on Android, falling back to a plain download only where neither exists']]
+}, {
   version: '3.4.0',
   date: '2026-09-12',
   changes: [['added', 'Two earlier stages: New match (matched, nothing said yet) and Crossed paths (met in person, waiting to run into her again) — before Talking Stage even applies'], ['added', 'A relationship timeline on every person\'s page — every stage change, when it happened, and how long each stage lasted, built automatically as it happens'], ['added', 'A stats panel at the top of the home screen — how many people sit in each stage, tap one to filter the list to it'], ['changed', 'A completed date now promotes straight to Dating from any of the three earlier stages, not just Talking Stage']]
@@ -17064,7 +17318,9 @@ function RelationshipTracker() {
     className: "banner-mark shrink-0 rounded-2xl"
   }), /*#__PURE__*/React.createElement("h1", {
     className: "banner-title font-serif tracking-tight leading-none"
-  }, "Spinning Plates"))), /*#__PURE__*/React.createElement("div", {
+  }, "Spinning Plates", /*#__PURE__*/React.createElement("span", {
+    className: "version-suffix font-sans text-stone-400 ml-1.5 align-baseline"
+  }, "v", APP_VERSION)))), /*#__PURE__*/React.createElement("div", {
     className: "max-w-2xl mx-auto px-4 pt-4 pb-8"
   }, /*#__PURE__*/React.createElement("header", {
     className: "mb-5"
@@ -17898,15 +18154,15 @@ function ChatDateConfirmModal({
   const labels = payload.relativeLabels || [];
   const floor = payload.earliestCapture || '';
   const anchor = anchorLabel(labels);
-  const others = labels.filter(l => l !== anchor);
+  const others = labels.filter(l => l.label !== anchor.label);
 
   // He answers about the words on screen — "Yesterday was the 9th" — and the
   // capture date is worked out from that. Asking for two different things in one
   // box was the confusion.
-  const isYesterday = /yesterday/i.test(anchor);
+  const isYesterday = /yesterday/i.test(anchor.label);
   const defaultAnswer = isYesterday ? shiftDate(TODAY(), -1) : TODAY();
   const [answer, setAnswer] = useState(defaultAnswer);
-  const capture = captureFromLabel(anchor, answer);
+  const capture = captureFromLabel(anchor.label, answer);
   const tooEarly = floor && capture < floor;
   const quick = isYesterday ? [['Yesterday', shiftDate(TODAY(), -1)], ['Two days ago', shiftDate(TODAY(), -2)], ['A week ago', shiftDate(TODAY(), -7)]] : [['Today', TODAY()], ['Yesterday', shiftDate(TODAY(), -1)], ['A week ago', shiftDate(TODAY(), -7)]];
   return /*#__PURE__*/React.createElement("div", {
@@ -17919,9 +18175,9 @@ function ChatDateConfirmModal({
     className: "w-4 h-4 text-stone-600 mt-1 shrink-0"
   }), /*#__PURE__*/React.createElement("h3", {
     className: "font-serif text-lg leading-tight"
-  }, anchor ? 'The chat says "' + anchor + '". What date was that?' : 'When was this screenshot taken?')), /*#__PURE__*/React.createElement("p", {
+  }, anchor.label ? 'The chat says "' + anchor.label + '". What date was that?' : 'When was this screenshot taken?')), /*#__PURE__*/React.createElement("p", {
     className: "text-sm text-stone-700"
-  }, anchor ? 'Pick the actual date those messages were sent. Everything else in the chat follows from it.' : 'No date could be read from this chat, so give the day you took the screenshot.'), /*#__PURE__*/React.createElement("input", {
+  }, anchor.label ? 'Pick the actual date those messages were sent. Everything else in the chat follows from it.' : 'No date could be read from this chat, so give the day you took the screenshot.'), /*#__PURE__*/React.createElement("input", {
     type: "date",
     value: answer,
     max: TODAY(),
@@ -17933,14 +18189,14 @@ function ChatDateConfirmModal({
     key: label,
     onClick: () => setAnswer(d),
     className: `text-xs px-2.5 py-1 rounded-full border ${answer === d ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300'}`
-  }, label))), (others.length > 0 || anchor) && /*#__PURE__*/React.createElement("div", {
+  }, label))), (others.length > 0 || anchor.label) && /*#__PURE__*/React.createElement("div", {
     className: "mt-3 border-t border-stone-100 pt-2 space-y-0.5"
-  }, anchor && /*#__PURE__*/React.createElement("p", {
+  }, anchor.label && /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-stone-500"
-  }, "\"", anchor, "\" → ", formatDayLabel(answer)), others.map((l, i) => /*#__PURE__*/React.createElement("p", {
+  }, "\"", anchor.label, "\" → ", formatDayLabel(answer)), others.map((l, i) => /*#__PURE__*/React.createElement("p", {
     key: i,
     className: "text-[11px] text-stone-500"
-  }, "\"", l, "\" → ", formatDayLabel(parseDayLabel(l, capture) || capture))), /*#__PURE__*/React.createElement("p", {
+  }, "\"", l.label, "\" → ", formatDayLabel(resolveRelativeLabel(l, anchor, capture)))), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-stone-400 pt-1"
   }, "Screenshot taken ", formatDayLabel(capture), ".")), tooEarly && /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-red-700 mt-2"
@@ -20059,7 +20315,7 @@ function ChatImportModal({
       setMode(match ? 'existing' : 'new');
       setPersonId(match ? match.x.id : people[0] ? people[0].id : '');
       setNewName(p.contactName || '');
-      setDateValue(/yesterday/i.test(anchorLabel(p.relativeLabels || [])) ? shiftDate(TODAY(), -1) : TODAY());
+      setDateValue(/yesterday/i.test(anchorLabel(p.relativeLabels || []).label) ? shiftDate(TODAY(), -1) : TODAY());
       setPhase('review');
     } catch (err) {
       setErrMsg((err && err.fileName ? err.fileName + ': ' : '') + (friendlyExtractError(err) || 'Could not read that screenshot — ' + String(err && err.message || err)));
@@ -20117,7 +20373,7 @@ function ChatImportModal({
     }
     setPhase('loading');
     setProgress('Saving…');
-    const capture = payload.needsDate ? captureFromLabel(anchorLabel(payload.relativeLabels || []), dateValue) : null;
+    const capture = payload.needsDate ? captureFromLabel(anchorLabel(payload.relativeLabels || []).label, dateValue) : null;
     const res = await onCommit(payload, targetId, capture);
     next(qIndex, label + ' — ' + res.added + ' line' + (res.added === 1 ? '' : 's') + (res.dropped ? ', ' + res.dropped + ' duplicate' + (res.dropped === 1 ? '' : 's') + ' skipped' : ''));
   }
@@ -20241,9 +20497,9 @@ function ChatImportModal({
   }, "Created at talking stage with no profile", payload.appName ? ` — recorded as ${payload.appName}.` : ' — recorded as met in person. Import a profile later to change that.')), payload.needsDate && (() => {
     const labels = payload.relativeLabels || [];
     const anchor = anchorLabel(labels);
-    const capture = captureFromLabel(anchor, dateValue);
+    const capture = captureFromLabel(anchor.label, dateValue);
     return /*#__PURE__*/React.createElement(Field, {
-      label: anchor ? 'The chat says "' + anchor + '". What date was that?' : 'No date in this chat — when was it taken?',
+      label: anchor.label ? 'The chat says "' + anchor.label + '". What date was that?' : 'No date in this chat — when was it taken?',
       hint: "Everything else follows from this."
     }, /*#__PURE__*/React.createElement("input", {
       type: "date",
@@ -20253,10 +20509,10 @@ function ChatImportModal({
       className: selectCls
     }), /*#__PURE__*/React.createElement("div", {
       className: "mt-1.5 space-y-0.5"
-    }, labels.filter(l => l !== anchor).slice(0, 3).map((l, i) => /*#__PURE__*/React.createElement("p", {
+    }, labels.filter(l => l.label !== anchor.label).slice(0, 3).map((l, i) => /*#__PURE__*/React.createElement("p", {
       key: i,
       className: "text-[11px] text-stone-500"
-    }, "\"", l, "\" → ", formatDayLabel(parseDayLabel(l, capture) || capture))), /*#__PURE__*/React.createElement("p", {
+    }, "\"", l.label, "\" → ", formatDayLabel(resolveRelativeLabel(l, anchor, capture)))), /*#__PURE__*/React.createElement("p", {
       className: "text-[11px] text-stone-400"
     }, "Screenshot taken ", formatDayLabel(capture), ".")));
   })(), results.length > 0 && /*#__PURE__*/React.createElement("div", {
@@ -20768,6 +21024,8 @@ function SettingsModal({
   const [importErr, setImportErr] = useState('');
   const [pending, setPending] = useState(null);
   const [confirmReplace, setConfirmReplace] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportOutcome, setExportOutcome] = useState('');
   const importInputRef = React.useRef(null);
   function saveKey() {
     Local.set('anthropic-api-key', apiKey.trim());
@@ -20778,17 +21036,23 @@ function SettingsModal({
     Local.remove('anthropic-api-key');
     setApiKey('');
   }
-  function exportData() {
+  async function exportData() {
+    setExportBusy(true);
+    setExportOutcome('');
     const blob = {
       exportedAt: new Date().toISOString(),
       version: APP_VERSION,
       build: BUILD_STAMP,
       people
     };
-    const dataUrl = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(blob, null, 2));
-    downloadDataUrl(dataUrl, 'spinning-plates-backup.json');
+    const content = JSON.stringify(blob, null, 2);
+    const result = await saveFileToChosenLocation(content, 'spinning-plates-backup.json', 'application/json');
+    setExportBusy(false);
+    if (result === 'cancelled') return; // he backed out — nothing was saved, so the nag stays live
     Local.set('rt:last-export', TODAY());
     if (onExported) onExported(TODAY());
+    setExportOutcome(result === 'saved' ? 'Saved.' : 'Downloaded.');
+    setTimeout(() => setExportOutcome(''), 2500);
   }
   function handleImportFile(e) {
     const file = e.target.files && e.target.files[0];
@@ -20880,10 +21144,11 @@ function SettingsModal({
     className: "flex items-center gap-2"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: exportData,
-    className: "flex-1 flex items-center justify-center gap-1.5 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
+    disabled: exportBusy,
+    className: "flex-1 flex items-center justify-center gap-1.5 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100 disabled:opacity-60"
   }, /*#__PURE__*/React.createElement(Download, {
     className: "w-4 h-4"
-  }), " Export backup"), /*#__PURE__*/React.createElement("button", {
+  }), " ", exportBusy ? 'Waiting…' : exportOutcome || 'Export backup'), /*#__PURE__*/React.createElement("button", {
     onClick: () => importInputRef.current && importInputRef.current.click(),
     className: "flex-1 flex items-center justify-center gap-1.5 border border-stone-300 rounded-md py-2 text-sm font-medium hover:bg-stone-100"
   }, /*#__PURE__*/React.createElement(Upload, {
